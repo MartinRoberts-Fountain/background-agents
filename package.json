@@ -51,5 +51,8 @@
       "ruff check --fix",
       "ruff format"
     ]
+  },
+  "dependencies": {
+    "vercel": "^50.23.2"
   }
 }
