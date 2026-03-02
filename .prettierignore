@@ -19,6 +19,8 @@ venv/
 # Reference code (vendored)
 opencode-reference/
 
+helm-deployer/
+
 # Lock files
 package-lock.json
 pnpm-lock.yaml

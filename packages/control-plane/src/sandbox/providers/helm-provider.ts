@@ -248,6 +248,16 @@ export class HelmSandboxProvider implements SandboxProvider {
     if (error instanceof Error) {
       const errorMessage = error.message.toLowerCase();
       if (
+        errorMessage.includes("helm api error: 401") ||
+        errorMessage.includes('"error":"unauthorized"')
+      ) {
+        return new SandboxProviderError(
+          `${message}: ${error.message}. Verify HELM_API_SECRET matches between control-plane and helm-deployer.`,
+          "permanent",
+          error
+        );
+      }
+      if (
         errorMessage.includes("fetch failed") ||
         errorMessage.includes("etimedout") ||
         errorMessage.includes("econnreset") ||

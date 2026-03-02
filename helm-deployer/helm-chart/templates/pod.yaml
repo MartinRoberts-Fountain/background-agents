@@ -349,9 +349,9 @@ spec:
       ports:
         - name: jaeger-ui
           containerPort: {{ .Values.jaeger.ports.ui }}
-        - name: jaeger-otlp-grpc
+        - name: otlp-grpc
           containerPort: {{ .Values.jaeger.ports.otlpGrpc }}
-        - name: jaeger-otlp-http
+        - name: otlp-http
           containerPort: {{ .Values.jaeger.ports.otlpHttp }}
       resources:
         {{- toYaml .Values.jaeger.resources | nindent 8 }}

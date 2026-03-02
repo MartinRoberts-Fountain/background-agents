@@ -24,31 +24,88 @@ const API_SECRET = process.env.HELM_API_SECRET || "";
 const CHART_PATH = process.env.CHART_PATH || "/charts/open-inspect-sandbox";
 const HELM_NAMESPACE = process.env.HELM_NAMESPACE || "";
 const HELM_CREATE_NAMESPACE = process.env.HELM_CREATE_NAMESPACE === "true";
+const AUTH_DEBUG = process.env.AUTH_DEBUG === "true";
 
-/**
- * Verify a Bearer token using the same HMAC scheme as the control plane.
- * Token format: <timestamp_hex>.<signature_hex>
- */
 function verifyToken(authorization) {
-  if (!API_SECRET) return false;
-  if (!authorization || !authorization.startsWith("Bearer ")) return false;
+  if (!API_SECRET) {
+    return { ok: false, reason: "missing_api_secret" };
+  }
+  if (!authorization) {
+    return { ok: false, reason: "missing_authorization_header" };
+  }
+  if (!authorization.startsWith("Bearer ")) {
+    return { ok: false, reason: "authorization_not_bearer" };
+  }
 
   const token = authorization.slice(7);
   const dotIndex = token.indexOf(".");
-  if (dotIndex === -1) return false;
+  if (dotIndex === -1) {
+    return { ok: false, reason: "invalid_token_format" };
+  }
 
-  const timestampHex = token.slice(0, dotIndex);
+  const timestampPart = token.slice(0, dotIndex);
   const signature = token.slice(dotIndex + 1);
+  if (!timestampPart || !signature) {
+    return { ok: false, reason: "missing_token_parts" };
+  }
 
-  // Check timestamp is within 5 minutes
-  const timestamp = parseInt(timestampHex, 16);
+  // Shared package emits decimal timestamp; accept hex too for backward compatibility.
+  const isDecimalTimestamp = /^\d+$/.test(timestampPart);
+  const isHexTimestamp = /^[0-9a-fA-F]+$/.test(timestampPart);
+  if (!isDecimalTimestamp && !isHexTimestamp) {
+    return { ok: false, reason: "invalid_timestamp_format" };
+  }
+
+  const timestamp = parseInt(timestampPart, isDecimalTimestamp ? 10 : 16);
+  if (!Number.isFinite(timestamp)) {
+    return { ok: false, reason: "invalid_timestamp_number" };
+  }
+
+  // Check timestamp is within 5 minutes.
   const now = Date.now();
-  if (Math.abs(now - timestamp) > 5 * 60 * 1000) return false;
+  const skewMs = now - timestamp;
+  if (Math.abs(skewMs) > 5 * 60 * 1000) {
+    return { ok: false, reason: "token_expired_or_clock_skew", skewMs };
+  }
 
-  // Verify HMAC
-  const expected = crypto.createHmac("sha256", API_SECRET).update(timestampHex).digest("hex");
+  // Verify HMAC against timestamp string exactly as sent in token.
+  const expected = crypto.createHmac("sha256", API_SECRET).update(timestampPart).digest("hex");
+  if (signature.length !== expected.length) {
+    return { ok: false, reason: "signature_length_mismatch" };
+  }
 
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  const ok = crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  if (!ok) {
+    return { ok: false, reason: "signature_mismatch" };
+  }
+
+  return { ok: true, reason: "ok", skewMs };
+}
+
+function logUnauthorized(req, authResult) {
+  const authHeader = req.headers.authorization;
+  const hasBearer = Boolean(authHeader && authHeader.startsWith("Bearer "));
+  const tokenPreview =
+    hasBearer && authHeader.length > 20 ? `${authHeader.slice(0, 20)}...` : hasBearer ? "short_token" : "none";
+
+  const payload = {
+    method: req.method,
+    path: req.url,
+    reason: authResult.reason,
+    hasAuthorizationHeader: Boolean(authHeader),
+    hasBearerPrefix: hasBearer,
+    tokenPreview,
+    xRequestId: req.headers["x-request-id"] || null,
+    xTraceId: req.headers["x-trace-id"] || null,
+    userAgent: req.headers["user-agent"] || null,
+  };
+
+  if (AUTH_DEBUG) {
+    payload.skewMs = authResult.skewMs ?? null;
+    payload.authorizationHeaderLength = authHeader?.length ?? 0;
+  }
+
+  console.warn("[deployer] Unauthorized request", payload);
 }
 
 function jsonResponse(res, status, body) {
@@ -186,8 +243,10 @@ const server = http.createServer(async (req, res) => {
     return jsonResponse(res, 200, { status: "ok", service: "open-inspect-helm-deployer" });
   }
 
-  // Auth check for all other endpoints
-  if (!verifyToken(req.headers.authorization)) {
+  // Auth check for all other endpoints.
+  const authResult = verifyToken(req.headers.authorization);
+  if (!authResult.ok) {
+    logUnauthorized(req, authResult);
     return jsonResponse(res, 401, { error: "unauthorized" });
   }
 

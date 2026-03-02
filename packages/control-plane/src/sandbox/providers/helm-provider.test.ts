@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HelmApiClient, type HelmDeployRequest } from "./helm-provider";
+import { HelmApiClient, HelmSandboxProvider, type HelmDeployRequest } from "./helm-provider";
 
 vi.mock("@open-inspect/shared", () => ({
   generateInternalToken: vi.fn(async () => "test-token"),
@@ -84,5 +84,46 @@ describe("HelmApiClient URL normalization", () => {
       "https://helm-deployer.internal/deploy",
       expect.any(Object)
     );
+  });
+});
+
+describe("HelmSandboxProvider error classification", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("adds a secret mismatch hint for Helm API 401 responses", async () => {
+    const fetchMock = vi.fn(async () => {
+      return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new HelmApiClient({
+      apiUrl: "https://helm-deployer.internal",
+      apiSecret: "secret",
+      namespace: "open-inspect",
+      tunnelToken: "token",
+    });
+    const provider = new HelmSandboxProvider(client);
+
+    await expect(
+      provider.createSandbox({
+        sessionId: "session-123",
+        sandboxId: "sandbox-123",
+        repoOwner: "owner",
+        repoName: "repo",
+        controlPlaneUrl: "https://control-plane.example.com",
+        sandboxAuthToken: "auth-token",
+        provider: "anthropic",
+        model: "anthropic/claude-sonnet-4-5",
+      })
+    ).rejects.toMatchObject({
+      name: "SandboxProviderError",
+      errorType: "permanent",
+      message: expect.stringContaining(
+        "Verify HELM_API_SECRET matches between control-plane and helm-deployer."
+      ),
+    });
   });
 });
