@@ -708,6 +708,19 @@ export class SandboxLifecycleManager {
         this.wsManager.sendToSandbox({ type: "shutdown" });
         this.wsManager.closeSandboxWebSocket(1000, "Inactivity timeout");
 
+        // Explicitly delete sandbox resources if supported by provider
+        if (sandbox.modal_object_id && this.provider.deleteSandbox) {
+          this.log.info("Deleting sandbox resources", {
+            provider: this.provider.name,
+            provider_object_id: sandbox.modal_object_id,
+          });
+          this.provider.deleteSandbox(sandbox.modal_object_id).catch((e) => {
+            this.log.error("Failed to delete sandbox resources", {
+              error: e instanceof Error ? e.message : String(e),
+            });
+          });
+        }
+
         this.broadcaster.broadcast({
           type: "sandbox_warning",
           message: "Sandbox stopped due to inactivity, snapshot saved",
@@ -819,5 +832,14 @@ export class SandboxLifecycleManager {
    */
   onSandboxConnected(): void {
     this.isSpawningSandbox = false;
+  }
+
+  /**
+   * Explicitly delete sandbox resources via the provider.
+   */
+  async deleteSandbox(providerObjectId: string): Promise<void> {
+    if (this.provider.deleteSandbox) {
+      await this.provider.deleteSandbox(providerObjectId);
+    }
   }
 }

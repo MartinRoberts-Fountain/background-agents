@@ -297,4 +297,12 @@ export interface SandboxProvider {
    * @throws SandboxProviderError with errorType for error handling
    */
   takeSnapshot?(config: SnapshotConfig): Promise<SnapshotResult>;
+
+  /**
+   * Delete a sandbox and associated resources.
+   *
+   * @param providerObjectId - Provider's internal object ID
+   * @throws SandboxProviderError with errorType for circuit breaker handling
+   */
+  deleteSandbox?(providerObjectId: string): Promise<void>;
 }

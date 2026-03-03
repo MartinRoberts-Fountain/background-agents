@@ -78,6 +78,12 @@ export interface Env {
   HELM_NAMESPACE?: string; // Kubernetes namespace for sandbox pods (default: "open-inspect")
   CLOUDFLARE_TUNNEL_TOKEN?: string; // Cloudflare tunnel token for sandbox connectivity
 
+  // Coder provider configuration (required when SANDBOX_PROVIDER = "coder")
+  CODER_URL?: string; // Base URL of the Coder API
+  CODER_TOKEN?: string; // Coder session token
+  CODER_ORGANIZATION_ID?: string; // Organization ID for Coder workspaces
+  CODER_TEMPLATE_ID?: string; // Template ID for Coder workspaces
+
   // Sandbox lifecycle configuration
   SANDBOX_INACTIVITY_TIMEOUT_MS?: string; // Inactivity timeout in ms (default: 600000 = 10 min)
   EXECUTION_TIMEOUT_MS?: string; // Max processing time before auto-fail (default: 5400000 = 90 min)

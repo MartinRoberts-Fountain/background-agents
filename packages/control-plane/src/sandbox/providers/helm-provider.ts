@@ -195,6 +195,26 @@ export class HelmSandboxProvider implements SandboxProvider {
 
   constructor(private readonly client: HelmApiClient) {}
 
+  async deleteSandbox(releaseName: string): Promise<void> {
+    try {
+      const result = await this.client.delete({
+        releaseName,
+        namespace: this.client["config"].namespace,
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || "Helm delete failed");
+      }
+
+      log.info("Sandbox deleted via Helm", {
+        event: "sandbox.helm_deleted",
+        release_name: releaseName,
+      });
+    } catch (error) {
+      throw this.classifyError("Failed to delete sandbox via Helm", error);
+    }
+  }
+
   async createSandbox(config: CreateSandboxConfig): Promise<CreateSandboxResult> {
     try {
       // Generate a Helm release name from sandbox ID (must be DNS-compatible)

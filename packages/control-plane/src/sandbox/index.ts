@@ -39,6 +39,14 @@ export {
   type HelmApiConfig,
 } from "./providers/helm-provider";
 
+// Coder provider
+export {
+  CoderSandboxProvider,
+  CoderApiClient,
+  createCoderProvider,
+  type CoderApiConfig,
+} from "./providers/coder-provider";
+
 // Lifecycle decisions
 export {
   evaluateCircuitBreaker,
