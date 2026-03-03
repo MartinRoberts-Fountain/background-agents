@@ -139,6 +139,15 @@ export class ModalSandboxProvider implements SandboxProvider {
   }
 
   /**
+   * Delete a sandbox and associated resources.
+   */
+  async deleteSandbox(providerObjectId: string): Promise<void> {
+    // Modal provider doesn't currently support explicit sandbox deletion via HTTP API.
+    // Sandboxes are cleaned up automatically by Modal after their timeout expires.
+    return;
+  }
+
+  /**
    * Take a filesystem snapshot of the sandbox.
    */
   async takeSnapshot(config: SnapshotConfig): Promise<SnapshotResult> {

@@ -14,6 +14,7 @@ import { getGitHubAppConfig } from "../auth/github-app";
 import { createModalClient } from "../sandbox/client";
 import { createModalProvider } from "../sandbox/providers/modal-provider";
 import { createHelmProvider } from "../sandbox/providers/helm-provider";
+import { createCoderProvider } from "../sandbox/providers/coder-provider";
 import { createLogger, parseLogLevel } from "../logger";
 import type { Logger } from "../logger";
 import {
@@ -395,6 +396,24 @@ export class SessionDO extends DurableObject<Env> {
         apiSecret: this.env.HELM_API_SECRET,
         namespace: this.env.HELM_NAMESPACE || "open-inspect",
         tunnelToken: this.env.CLOUDFLARE_TUNNEL_TOKEN || "",
+      });
+    } else if (sandboxProvider === "coder") {
+      // Coder provider
+      if (
+        !this.env.CODER_URL ||
+        !this.env.CODER_TOKEN ||
+        !this.env.CODER_ORGANIZATION_ID ||
+        !this.env.CODER_TEMPLATE_ID
+      ) {
+        throw new Error(
+          "CODER_URL, CODER_TOKEN, CODER_ORGANIZATION_ID, and CODER_TEMPLATE_ID are required for Coder provider"
+        );
+      }
+      provider = createCoderProvider({
+        baseUrl: this.env.CODER_URL,
+        token: this.env.CODER_TOKEN,
+        organizationId: this.env.CODER_ORGANIZATION_ID,
+        templateId: this.env.CODER_TEMPLATE_ID,
       });
     } else {
       // Modal provider (default)
@@ -2227,6 +2246,20 @@ export class SessionDO extends DurableObject<Env> {
         this.wsManager.send(sandboxWs, { type: "shutdown" });
       }
       this.updateSandboxStatus("stopped");
+
+      // Explicitly delete sandbox resources if supported by provider
+      if (sandbox.modal_object_id) {
+        this.lifecycleManager.triggerSnapshot("cancel").catch(() => {});
+        this.log.info("Deleting sandbox resources", {
+          provider_object_id: sandbox.modal_object_id,
+        });
+
+        this.lifecycleManager.deleteSandbox(sandbox.modal_object_id).catch((e) => {
+          this.log.error("Failed to delete sandbox resources", {
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
+      }
     }
 
     return Response.json({ status: "cancelled" });
