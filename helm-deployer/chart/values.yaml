@@ -60,6 +60,15 @@ helm:
   # Keep false for least privilege RBAC (no cluster-scoped namespace create permission).
   createNamespace: false
 
+ingress:
+  # Set to true to create an Ingress for each sandbox environment.
+  enabled: false
+  # Ingress class name (e.g. nginx, traefik). Omit to use the cluster default.
+  className: ""
+  # Base domain for environment subdomains.
+  # Example: baseDomain=sandbox.example.com → env-0042.sandbox.example.com
+  baseDomain: ""
+
 rbac:
   create: true
 
