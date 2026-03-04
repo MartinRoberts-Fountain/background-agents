@@ -307,7 +307,7 @@ async function handleDeploy(body) {
   const createNamespaceFlag = HELM_CREATE_NAMESPACE ? "--create-namespace" : "";
   const cmd =
     `helm install ${releaseName} ${CHART_PATH} --namespace ${targetNamespace} ${createNamespaceFlag} ` +
-    `${setString} --wait --timeout 5m`;
+    `${setString}`;
 
   console.log(`[deployer] Installing release: ${releaseName}${envNumber ? ` (env-${envNumber})` : ""}`);
   try {

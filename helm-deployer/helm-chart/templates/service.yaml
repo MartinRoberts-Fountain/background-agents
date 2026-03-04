@@ -10,10 +10,10 @@ spec:
     {{- include "sandbox.selectorLabels" . | nindent 4 }}
   ports:
     - name: proxy
-      port: {{ .Values.reverseProxy.port }}
+      port: {{ .Values.sandboxImage.proxyPort }}
       targetPort: proxy
     - name: opencode
-      port: {{ .Values.opencode.port }}
+      port: {{ .Values.sandboxImage.opencodePort }}
       targetPort: opencode
     - name: terminal
       port: {{ .Values.ttyd.port }}

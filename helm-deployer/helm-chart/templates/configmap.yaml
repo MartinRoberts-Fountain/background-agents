@@ -16,7 +16,7 @@ data:
   SESSION_CONFIG: {{ dict "session_id" .Values.sandbox.sessionId "repo_owner" .Values.sandbox.repoOwner "repo_name" .Values.sandbox.repoName "branch" .Values.sandbox.branch "provider" .Values.sandbox.provider "model" .Values.sandbox.model "agent" .Values.sandbox.agent | toJson | quote }}
   VCS_HOST: {{ .Values.git.vcsHost | quote }}
   VCS_CLONE_USERNAME: {{ .Values.git.vcsCloneUsername | quote }}
-  OPENCODE_PORT: {{ .Values.opencode.port | quote }}
+  OPENCODE_PORT: {{ .Values.sandboxImage.opencodePort | quote }}
   REDIS_URL: "redis://localhost:{{ .Values.redis.port }}"
   MONGODB_URL: "mongodb://localhost:{{ .Values.mongodb.port }}"
   RABBITMQ_URL: "amqp://guest:guest@localhost:{{ .Values.rabbitmq.ports.amqp }}"
