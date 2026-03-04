@@ -622,11 +622,12 @@ class AgentBridge:
             reasoning_effort=reasoning_effort,
         )
 
+        scm_login = author_data.get("scmLogin")
         scm_name = author_data.get("scmName")
         scm_email = author_data.get("scmEmail")
         await self._configure_git_identity(
             GitUser(
-                name=scm_name or FALLBACK_GIT_USER.name,
+                name=scm_name or scm_login or FALLBACK_GIT_USER.name,
                 email=scm_email or FALLBACK_GIT_USER.email,
             )
         )

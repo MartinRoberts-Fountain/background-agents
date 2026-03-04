@@ -485,7 +485,9 @@ async function handleNewSession(
   const prompt =
     mode === "plan" && webhook.agentSession.promptContext
       ? `${basePrompt}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations.`
-      : basePrompt;
+      : mode === "apply" && webhook.agentSession.promptContext
+        ? `${basePrompt}\n\nIMPORTANT: You are in APPLY mode. Create a new branch, implement all changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI.`
+        : basePrompt;
   const callbackContext: CallbackContext = {
     source: "linear",
     issueId: issue.id,
@@ -649,7 +651,7 @@ function buildPrompt(
   } else {
     parts.push(
       "",
-      "Please implement the changes described in this issue. Create a pull request when done."
+      "IMPORTANT: You are in APPLY mode. Create a new branch off the base branch, implement the changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. You MUST open a pull request before finishing."
     );
   }
 

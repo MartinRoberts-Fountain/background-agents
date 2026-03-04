@@ -198,6 +198,7 @@ export class SessionMessageQueue {
       agent: session?.default_agent ?? undefined,
       author: {
         userId: author?.user_id ?? "unknown",
+        scmLogin: author?.scm_login ?? null,
         scmName: author?.scm_name ?? null,
         scmEmail: author?.scm_email ?? null,
       },

@@ -71,6 +71,12 @@ spec:
               "model": "{{ .Values.sandbox.model }}",
               "branch": "{{ .Values.sandbox.branch }}"
             }
+        # MongoDB Atlas Local uses the pod name as its replica-set name.
+        # Inject it here so wx-system can build the correct connection string.
+        - name: MONGODB_REPLICA_SET
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
       volumeMounts:
         - name: workspace
           mountPath: /workspace
@@ -132,6 +138,30 @@ spec:
     # ========================================
     - name: mongodb
       image: {{ .Values.mongodb.image }}
+      env:
+        - name: MONGODB_INITDB_ROOT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "sandbox.fullname" . }}-secrets
+              key: MONGODB_ROOT_USERNAME
+        - name: MONGODB_INITDB_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "sandbox.fullname" . }}-secrets
+              key: MONGODB_ROOT_PASSWORD
+      # Reconfigure the replica-set member hostname to localhost:27017 so all
+      # containers in the pod can connect via localhost.  The Atlas-local image
+      # initialises the RS with the pod hostname, which is not resolvable inside
+      # the pod network namespace.
+      lifecycle:
+        postStart:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - |
+                until mongosh --quiet --eval "db.adminCommand('ping')" >/dev/null 2>&1; do sleep 1; done
+                mongosh --quiet --eval "try { var c = rs.conf(); c.members[0].host = 'localhost:27017'; rs.reconfig(c, {force:true}); } catch(e) { print(e); }" || true
       ports:
         - name: mongodb
           containerPort: {{ .Values.mongodb.port }}

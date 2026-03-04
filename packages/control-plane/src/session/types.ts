@@ -118,6 +118,7 @@ export interface PromptCommand {
   agent?: string; // OpenCode primary agent id (e.g. from .opencode/agents/foo.md)
   author: {
     userId: string;
+    scmLogin: string | null;
     scmName: string | null;
     scmEmail: string | null;
   };
