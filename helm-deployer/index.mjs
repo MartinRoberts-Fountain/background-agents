@@ -225,7 +225,6 @@ async function handleDeploy(body) {
     branch,
     agent,
     timeoutSeconds,
-    tunnelToken,
     namespace,
     scmProvider,
     anthropicApiKey,
@@ -247,7 +246,6 @@ async function handleDeploy(body) {
   ];
 
   if (agent) setArgs.push(`sandbox.agent=${agent}`);
-  if (tunnelToken) setArgs.push(`cloudflareTunnel.tunnelToken=${tunnelToken}`);
   if (anthropicApiKey) setArgs.push(`anthropicApiKey=${anthropicApiKey}`);
   if (gitCloneToken) setArgs.push(`git.cloneToken=${gitCloneToken}`);
   if (scmProvider === "bitbucket") {

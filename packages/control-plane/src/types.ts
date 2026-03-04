@@ -74,7 +74,6 @@ export interface Env {
   HELM_API_URL?: string; // Base URL of the Helm deployer API
   HELM_API_SECRET?: string; // Shared secret for Helm deployer auth
   HELM_NAMESPACE?: string; // Kubernetes namespace for sandbox pods (default: "open-inspect")
-  CLOUDFLARE_TUNNEL_TOKEN?: string; // Cloudflare tunnel token for sandbox connectivity
 
   // EC2 provider configuration
   EC2_API_URL?: string; // Base URL of the EC2 deployer worker

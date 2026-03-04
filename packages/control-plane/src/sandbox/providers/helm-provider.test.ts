@@ -16,7 +16,6 @@ const deployRequest: HelmDeployRequest = {
   provider: "anthropic",
   model: "anthropic/claude-sonnet-4-5",
   timeoutSeconds: 300,
-  tunnelToken: "tunnel-token",
   namespace: "open-inspect",
 };
 
@@ -45,7 +44,6 @@ describe("HelmApiClient URL normalization", () => {
       apiUrl: "helm-deployer.open-inspect-system.svc.cluster.local.",
       apiSecret: "secret",
       namespace: "open-inspect",
-      tunnelToken: "token",
     });
 
     await client.deploy(deployRequest);
@@ -75,7 +73,6 @@ describe("HelmApiClient URL normalization", () => {
       apiUrl: "https://helm-deployer.internal/",
       apiSecret: "secret",
       namespace: "open-inspect",
-      tunnelToken: "token",
     });
 
     await client.deploy(deployRequest);
@@ -103,7 +100,6 @@ describe("HelmSandboxProvider error classification", () => {
       apiUrl: "https://helm-deployer.internal",
       apiSecret: "secret",
       namespace: "open-inspect",
-      tunnelToken: "token",
     });
     const provider = new HelmSandboxProvider(client);
 

@@ -397,7 +397,6 @@ export class SessionDO extends DurableObject<Env> {
         apiUrl: this.env.HELM_API_URL,
         apiSecret: this.env.HELM_API_SECRET,
         namespace: this.env.HELM_NAMESPACE || "open-inspect",
-        tunnelToken: this.env.CLOUDFLARE_TUNNEL_TOKEN || "",
         scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
       });
     } else if (sandboxProvider === "ec2") {
