@@ -301,7 +301,7 @@ export async function getRepoSuggestions(
     const data = await linearGraphQL(
       client,
       `
-      query RepoSuggestions($issueId: String!, $agentSessionId: String!, $candidateRepositories: [RepositorySuggestionInput!]!) {
+      query RepoSuggestions($issueId: String!, $agentSessionId: String!, $candidateRepositories: [RepositoryDataInput!]!) {
         issueRepositorySuggestions(
           issueId: $issueId
           agentSessionId: $agentSessionId

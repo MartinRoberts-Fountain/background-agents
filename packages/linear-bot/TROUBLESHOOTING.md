@@ -110,7 +110,7 @@ App” when creating the session.
 - The flow continues anyway: on error the bot returns no suggestions and falls back to project/team
   mapping or LLM classification. If sessions still fail, the cause is likely elsewhere (e.g. no
   mapping and classifier uncertain).
-- If Linear changed the `RepositorySuggestionInput` shape or query, update `getRepoSuggestions` in
+- If Linear changed the `RepositoryDataInput` shape or query, update `getRepoSuggestions` in
   `packages/linear-bot/src/utils/linear-client.ts` to match the
   [Linear API schema](https://studio.apollographql.com/public/Linear-API/variant/current/schema) and
   [agent docs](https://linear.app/developers/agent-interaction#repository-suggestions).
