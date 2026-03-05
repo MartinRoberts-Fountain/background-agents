@@ -429,7 +429,7 @@ async function handleNewSession(
       title: `${issue.identifier}: ${issue.title}`,
       model,
       reasoningEffort,
-      sandboxProvider: mode === "plan" ? "modal" : "helm",
+      mode,
     }),
   });
 

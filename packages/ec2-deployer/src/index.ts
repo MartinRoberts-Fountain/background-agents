@@ -271,7 +271,7 @@ export class EC2InstanceDO extends DurableObject<Env> {
     // Only includes dynamic configuration that cannot be baked into the AMI.
     const userData = btoa(`#!/bin/bash
 # Write dynamic Cloudflare Tunnel token
-echo "${tunnelToken}" > /etc/cloudflared/token
+sudo cloudflared service install "${tunnelToken}"
 
 # Write dynamic environment for OpenCode server
 cat > /etc/opencode/env <<EOF

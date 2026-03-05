@@ -390,11 +390,20 @@ export class SessionDO extends DurableObject<Env> {
    * Create the lifecycle manager with all required adapters.
    */
   private createLifecycleManager(): SandboxLifecycleManager {
-    // Session-level provider override takes precedence over environment defaults.
+    // Session-level provider override takes precedence over mode-based defaults.
     const session = this.repository.getSession();
-    const sandboxProvider =
-      session?.sandbox_provider ||
-      (this.env.HELM_API_URL && this.env.HELM_API_SECRET ? "helm" : "modal");
+    let sandboxProvider = session?.sandbox_provider;
+
+    if (!sandboxProvider) {
+      if (session?.mode === "plan") {
+        sandboxProvider = "helm";
+      } else if (session?.mode === "apply") {
+        sandboxProvider = "ec2";
+      } else {
+        sandboxProvider = this.env.HELM_API_URL && this.env.HELM_API_SECRET ? "helm" : "modal";
+      }
+    }
+
     let provider;
 
     if (sandboxProvider === "helm") {
@@ -1643,6 +1652,7 @@ export class SessionDO extends DurableObject<Env> {
       reasoningEffort?: string; // Reasoning effort level
       agent?: string | null; // OpenCode primary agent id (e.g. from .opencode/agents/foo.md)
       sandboxProvider?: string | null; // Infrastructure provider override ("modal" or "helm")
+      mode?: "plan" | "apply" | null;
       userId: string;
       scmLogin?: string;
       scmName?: string;
@@ -1704,6 +1714,7 @@ export class SessionDO extends DurableObject<Env> {
       spawnDepth: body.spawnDepth ?? 0,
       defaultAgent: body.agent ?? null,
       sandboxProvider: body.sandboxProvider ?? null,
+      mode: body.mode ?? null,
       createdAt: now,
       updatedAt: now,
     });
@@ -1757,6 +1768,7 @@ export class SessionDO extends DurableObject<Env> {
       currentSha: session.current_sha,
       opencodeSessionId: session.opencode_session_id,
       status: session.status,
+      mode: session.mode,
       model: session.model,
       reasoningEffort: session.reasoning_effort ?? undefined,
       createdAt: session.created_at,
@@ -2187,7 +2199,9 @@ export class SessionDO extends DurableObject<Env> {
       repoName: session.repo_name,
       repoId: session.repo_id,
       model: session.model,
-      reasoningEffort: session.reasoning_effort ?? null,
+      reasoningEffort: session.reasoning_effort,
+      mode: session.mode,
+      sandboxProvider: session.sandbox_provider,
       owner: {
         userId: owner.user_id,
         scmLogin: owner.scm_login,

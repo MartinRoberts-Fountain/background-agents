@@ -68,8 +68,9 @@ export interface Session {
   opencodeSessionId: string | null;
   status: SessionStatus;
   parentSessionId: string | null;
-  spawnSource: SpawnSource;
-  spawnDepth: number;
+  spawn_source: SpawnSource;
+  spawn_depth: number;
+  mode?: "plan" | "apply";
   createdAt: number;
   updatedAt: number;
 }
@@ -493,6 +494,8 @@ export interface CreateSessionRequest {
   agent?: string;
   /** Override the infrastructure provider for this session ("modal", "helm", or "ec2"). */
   sandboxProvider?: "modal" | "helm" | "ec2";
+  /** The session mode: "plan" for analysis/planning, "apply" for implementation. */
+  mode?: "plan" | "apply";
 }
 
 export interface CreateSessionResponse {
@@ -516,6 +519,8 @@ export interface SpawnChildSessionRequest {
   repoName?: string;
   model?: string;
   reasoningEffort?: string;
+  mode?: "plan" | "apply";
+  sandboxProvider?: "modal" | "helm" | "ec2";
 }
 
 /** Returned by parent DO's GET /internal/spawn-context */
@@ -525,6 +530,8 @@ export interface SpawnContext {
   repoId: number | null;
   model: string;
   reasoningEffort: string | null;
+  mode: "plan" | "apply" | null;
+  sandboxProvider: "modal" | "helm" | "ec2" | null;
   owner: {
     userId: string;
     scmLogin: string | null;
