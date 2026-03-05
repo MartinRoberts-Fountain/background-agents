@@ -9,6 +9,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { initSchema } from "./schema";
+import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
 import { generateId, hashToken, timingSafeEqual } from "../auth/crypto";
 import { getGitHubAppConfig, getCachedInstallationToken } from "../auth/github-app";
 import { createModalClient } from "../sandbox/client";
@@ -72,30 +73,9 @@ import { CallbackNotificationService } from "./callback-notification-service";
 import { PresenceService } from "./presence-service";
 import { SessionMessageQueue } from "./message-queue";
 import { SessionSandboxEventProcessor } from "./sandbox-events";
-
-/**
- * Valid event types for filtering.
- * Includes both external types (from types.ts) and internal types used by the sandbox.
- */
-const VALID_EVENT_TYPES = [
-  "tool_call",
-  "tool_result",
-  "token",
-  "error",
-  "git_sync",
-  "step_start",
-  "step_finish",
-  "execution_complete",
-  "heartbeat",
-  "push_complete",
-  "push_error",
-  "user_message",
-] as const;
-
-/**
- * Valid message statuses for filtering.
- */
-const VALID_MESSAGE_STATUSES = ["pending", "processing", "completed", "failed"] as const;
+import { createSessionInternalRoutes } from "./http/routes";
+import { createMessagesHandler, type MessagesHandler } from "./http/handlers/messages.handler";
+import { MessageService } from "./services/message.service";
 
 /**
  * Timeout for WebSocket authentication (in milliseconds).
@@ -114,15 +94,6 @@ const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /** Statuses that indicate a session has reached a final state and cannot be cancelled. */
 const TERMINAL_STATUSES = new Set(["completed", "archived", "cancelled", "failed"]);
-
-/**
- * Route definition for internal API endpoints.
- */
-interface InternalRoute {
-  method: string;
-  path: string;
-  handler: (request: Request, url: URL) => Promise<Response> | Response;
-}
 
 export class SessionDO extends DurableObject<Env> {
   private sql: SqlStorage;
@@ -143,60 +114,36 @@ export class SessionDO extends DurableObject<Env> {
   private _presenceService: PresenceService | null = null;
   // Message queue service (lazily initialized)
   private _messageQueue: SessionMessageQueue | null = null;
+  // Message service (lazily initialized)
+  private _messageService: MessageService | null = null;
+  // Messages handler (lazily initialized)
+  private _messagesHandler: MessagesHandler | null = null;
   // Sandbox event processor (lazily initialized)
   private _sandboxEventProcessor: SessionSandboxEventProcessor | null = null;
 
-  // Route table for internal API endpoints
-  private readonly routes: InternalRoute[] = [
-    { method: "POST", path: "/internal/init", handler: (req) => this.handleInit(req) },
-    { method: "GET", path: "/internal/state", handler: () => this.handleGetState() },
-    { method: "POST", path: "/internal/prompt", handler: (req) => this.handleEnqueuePrompt(req) },
-    { method: "POST", path: "/internal/stop", handler: () => this.handleStop() },
-    {
-      method: "POST",
-      path: "/internal/sandbox-event",
-      handler: (req) => this.handleSandboxEvent(req),
-    },
-    { method: "GET", path: "/internal/participants", handler: () => this.handleListParticipants() },
-    {
-      method: "POST",
-      path: "/internal/participants",
-      handler: (req) => this.handleAddParticipant(req),
-    },
-    { method: "GET", path: "/internal/events", handler: (_, url) => this.handleListEvents(url) },
-    { method: "GET", path: "/internal/artifacts", handler: () => this.handleListArtifacts() },
-    {
-      method: "GET",
-      path: "/internal/messages",
-      handler: (_, url) => this.handleListMessages(url),
-    },
-    { method: "POST", path: "/internal/create-pr", handler: (req) => this.handleCreatePR(req) },
-    {
-      method: "POST",
-      path: "/internal/ws-token",
-      handler: (req) => this.handleGenerateWsToken(req),
-    },
-    { method: "POST", path: "/internal/archive", handler: (req) => this.handleArchive(req) },
-    { method: "POST", path: "/internal/unarchive", handler: (req) => this.handleUnarchive(req) },
-    {
-      method: "POST",
-      path: "/internal/verify-sandbox-token",
-      handler: (req) => this.handleVerifySandboxToken(req),
-    },
-    {
-      method: "POST",
-      path: "/internal/openai-token-refresh",
-      handler: () => this.handleOpenAITokenRefresh(),
-    },
-    { method: "GET", path: "/internal/spawn-context", handler: () => this.handleGetSpawnContext() },
-    { method: "GET", path: "/internal/child-summary", handler: () => this.handleGetChildSummary() },
-    { method: "POST", path: "/internal/cancel", handler: () => this.handleCancel() },
-    {
-      method: "POST",
-      path: "/internal/child-session-update",
-      handler: (req) => this.handleChildSessionUpdate(req),
-    },
-  ];
+  // Internal HTTP route table (transport wiring only; handlers remain on SessionDO).
+  private readonly routes = createSessionInternalRoutes({
+    init: (request) => this.handleInit(request),
+    state: () => this.handleGetState(),
+    prompt: (request) => this.messagesHandler.enqueuePrompt(request),
+    stop: () => this.messagesHandler.stop(),
+    sandboxEvent: (request) => this.handleSandboxEvent(request),
+    listParticipants: () => this.handleListParticipants(),
+    addParticipant: (request) => this.handleAddParticipant(request),
+    listEvents: (_request, url) => this.messagesHandler.listEvents(url),
+    listArtifacts: () => this.messagesHandler.listArtifacts(),
+    listMessages: (_request, url) => this.messagesHandler.listMessages(url),
+    createPr: (request) => this.handleCreatePR(request),
+    wsToken: (request) => this.handleGenerateWsToken(request),
+    archive: (request) => this.handleArchive(request),
+    unarchive: (request) => this.handleUnarchive(request),
+    verifySandboxToken: (request) => this.handleVerifySandboxToken(request),
+    openaiTokenRefresh: () => this.handleOpenAITokenRefresh(),
+    spawnContext: () => this.handleGetSpawnContext(),
+    childSummary: () => this.handleGetChildSummary(),
+    cancel: () => this.handleCancel(),
+    childSessionUpdate: (request) => this.handleChildSessionUpdate(request),
+  });
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -336,6 +283,30 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     return this._messageQueue;
+  }
+
+  private get messageService(): MessageService {
+    if (!this._messageService) {
+      this._messageService = new MessageService({
+        repository: this.repository,
+        messageQueue: this.messageQueue,
+        stopExecution: () => this.stopExecution(),
+        parseArtifactMetadata: (artifact) => this.parseArtifactMetadata(artifact),
+      });
+    }
+
+    return this._messageService;
+  }
+
+  private get messagesHandler(): MessagesHandler {
+    if (!this._messagesHandler) {
+      this._messagesHandler = createMessagesHandler({
+        messageService: this.messageService,
+        getLog: () => this.log,
+      });
+    }
+
+    return this._messagesHandler;
   }
 
   private get sandboxEventProcessor(): SessionSandboxEventProcessor {
@@ -1323,7 +1294,7 @@ export class SessionDO extends DurableObject<Env> {
     this.ctx.waitUntil(
       parentStub
         .fetch(
-          new Request("http://internal/internal/child-session-update", {
+          new Request(buildSessionInternalUrl(SessionInternalPaths.childSessionUpdate), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1777,32 +1748,6 @@ export class SessionDO extends DurableObject<Env> {
     });
   }
 
-  private async handleEnqueuePrompt(request: Request): Promise<Response> {
-    try {
-      const body = (await request.json()) as {
-        content: string;
-        authorId: string;
-        source: string;
-        model?: string;
-        reasoningEffort?: string;
-        attachments?: Array<{ type: string; name: string; url?: string }>;
-        callbackContext?: Record<string, unknown>;
-      };
-
-      return Response.json(await this.messageQueue.enqueuePromptFromApi(body));
-    } catch (error) {
-      this.log.error("handleEnqueuePrompt error", {
-        error: error instanceof Error ? error : String(error),
-      });
-      throw error;
-    }
-  }
-
-  private async handleStop(): Promise<Response> {
-    await this.stopExecution();
-    return Response.json({ status: "stopping" });
-  }
-
   private async handleSandboxEvent(request: Request): Promise<Response> {
     const event = (await request.json()) as SandboxEvent;
     await this.processSandboxEvent(event);
@@ -1847,83 +1792,6 @@ export class SessionDO extends DurableObject<Env> {
     });
 
     return Response.json({ id, status: "added" });
-  }
-
-  private handleListEvents(url: URL): Response {
-    const cursor = url.searchParams.get("cursor");
-    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50"), 200);
-    const type = url.searchParams.get("type");
-    const messageId = url.searchParams.get("message_id");
-
-    // Validate type parameter if provided
-    if (type && !VALID_EVENT_TYPES.includes(type as (typeof VALID_EVENT_TYPES)[number])) {
-      return Response.json({ error: `Invalid event type: ${type}` }, { status: 400 });
-    }
-
-    const events = this.repository.listEvents({ cursor, limit, type, messageId });
-    const hasMore = events.length > limit;
-
-    if (hasMore) events.pop();
-
-    return Response.json({
-      events: events.map((e) => ({
-        id: e.id,
-        type: e.type,
-        data: JSON.parse(e.data),
-        messageId: e.message_id,
-        createdAt: e.created_at,
-      })),
-      cursor: events.length > 0 ? events[events.length - 1].created_at.toString() : undefined,
-      hasMore,
-    });
-  }
-
-  private handleListArtifacts(): Response {
-    const artifacts = this.repository.listArtifacts();
-
-    return Response.json({
-      artifacts: artifacts.map((a) => ({
-        id: a.id,
-        type: a.type,
-        url: a.url,
-        metadata: this.parseArtifactMetadata(a),
-        createdAt: a.created_at,
-      })),
-    });
-  }
-
-  private handleListMessages(url: URL): Response {
-    const cursor = url.searchParams.get("cursor");
-    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50"), 100);
-    const status = url.searchParams.get("status");
-
-    // Validate status parameter if provided
-    if (
-      status &&
-      !VALID_MESSAGE_STATUSES.includes(status as (typeof VALID_MESSAGE_STATUSES)[number])
-    ) {
-      return Response.json({ error: `Invalid message status: ${status}` }, { status: 400 });
-    }
-
-    const messages = this.repository.listMessages({ cursor, limit, status });
-    const hasMore = messages.length > limit;
-
-    if (hasMore) messages.pop();
-
-    return Response.json({
-      messages: messages.map((m) => ({
-        id: m.id,
-        authorId: m.author_id,
-        content: m.content,
-        source: m.source,
-        status: m.status,
-        createdAt: m.created_at,
-        startedAt: m.started_at,
-        completedAt: m.completed_at,
-      })),
-      cursor: messages.length > 0 ? messages[messages.length - 1].created_at.toString() : undefined,
-      hasMore,
-    });
   }
 
   /**
