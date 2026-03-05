@@ -69,6 +69,7 @@ import { mergeSecrets } from "../db/secrets-validation";
 import { OpenAITokenRefreshService } from "./openai-token-refresh-service";
 import { ParticipantService, getAvatarUrl } from "./participant-service";
 import { UserScmTokenStore } from "../db/user-scm-tokens";
+import { DOFetcherAdapter } from "../scheduler/do-fetcher-adapter";
 import { CallbackNotificationService } from "./callback-notification-service";
 import { PresenceService } from "./presence-service";
 import { SessionMessageQueue } from "./message-queue";
@@ -199,9 +200,17 @@ export class SessionDO extends DurableObject<Env> {
    */
   private get callbackService(): CallbackNotificationService {
     if (!this._callbackService) {
+      // Wrap SchedulerDO namespace as a Fetcher for automation callbacks
+      const schedulerCallback = this.env.SCHEDULER
+        ? new DOFetcherAdapter(this.env.SCHEDULER, "global-scheduler")
+        : undefined;
+
       this._callbackService = new CallbackNotificationService({
         repository: this.repository,
-        env: this.env,
+        env: {
+          ...this.env,
+          SCHEDULER_CALLBACK: schedulerCallback,
+        },
         log: this.log,
         getSessionId: () => {
           const session = this.getSession();
@@ -2061,7 +2070,7 @@ export class SessionDO extends DurableObject<Env> {
       model: session.model,
       reasoningEffort: session.reasoning_effort,
       mode: session.mode,
-      sandboxProvider: session.sandbox_provider,
+      sandboxProvider: session.sandbox_provider as "modal" | "helm" | "ec2" | null,
       owner: {
         userId: owner.user_id,
         scmLogin: owner.scm_login,

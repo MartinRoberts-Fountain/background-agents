@@ -25,7 +25,7 @@ export type SandboxStatus =
   | "failed";
 export type GitSyncStatus = "pending" | "in_progress" | "completed" | "failed";
 export type MessageStatus = "pending" | "processing" | "completed" | "failed";
-export type MessageSource = "web" | "slack" | "linear" | "extension" | "github";
+export type MessageSource = "web" | "slack" | "linear" | "extension" | "github" | "automation";
 export type ArtifactType = "pr" | "screenshot" | "preview" | "branch";
 export type EventType =
   | "heartbeat"
@@ -42,7 +42,7 @@ export type EventType =
   | "push_error"
   | "user_message";
 export type ParticipantRole = "owner" | "member";
-export type SpawnSource = "user" | "agent";
+export type SpawnSource = "user" | "agent" | "automation";
 export type ConfidenceLevel = "high" | "medium" | "low";
 
 // Participant in a session
@@ -552,3 +552,4 @@ export interface ChildSessionDetail {
 }
 
 export * from "./integrations";
+export * from "./automations";

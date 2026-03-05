@@ -14,6 +14,9 @@ interface DeployBody {
   controlPlaneUrl: string;
   sandboxAuthToken: string;
   provider: string;
+  repoOwner: string;
+  repoName: string;
+  userEnvVars?: Record<string, string>;
   model: string;
 }
 

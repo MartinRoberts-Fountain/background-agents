@@ -68,7 +68,7 @@ export interface UpsertSessionData {
   status: SessionStatus;
   parentSessionId?: string | null;
   spawnSource?: SpawnSource;
-  spawn_depth?: number;
+  spawnDepth?: number;
   defaultAgent?: string | null;
   sandboxProvider?: string | null;
   mode?: "plan" | "apply" | null;

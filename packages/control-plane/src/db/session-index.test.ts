@@ -12,7 +12,7 @@ type SessionRow = {
   base_branch: string | null;
   status: string;
   parent_session_id: string | null;
-  spawn_source: "user" | "agent";
+  spawn_source: "user" | "agent" | "automation";
   spawn_depth: number;
   automation_id: string | null;
   automation_run_id: string | null;
@@ -140,7 +140,7 @@ class FakeD1Database {
         string | null,
         string,
         string | null,
-        "user" | "agent",
+        "user" | "agent" | "automation",
         number,
         string | null,
         string | null,
