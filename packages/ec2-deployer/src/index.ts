@@ -294,6 +294,7 @@ LLM_MODEL=${config.model}
 REPO_OWNER=${config.repoOwner}
 REPO_NAME=${config.repoName}
 VCS_CLONE_TOKEN=${config.userEnvVars?.["VCS_CLONE_TOKEN"] || config.userEnvVars?.["GITHUB_APP_TOKEN"] || config.userEnvVars?.["GITHUB_TOKEN"] || ""}
+ANTHROPIC_API_KEY=${config.userEnvVars?.["ANTHROPIC_API_KEY"] || ""}
 EOF
 
 # Trigger start-up of baked services
