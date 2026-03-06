@@ -171,9 +171,9 @@ class TestFallbackGitUserConstant:
     """Tests for the FALLBACK_GIT_USER constant."""
 
     def test_fallback_identity_values(self):
-        """Fallback should use Open-Inspect noreply identity."""
-        assert FALLBACK_GIT_USER.name == "OpenInspect"
-        assert FALLBACK_GIT_USER.email == "open-inspect@noreply.github.com"
+        """Fallback should use Fountain Coding Agent noreply identity."""
+        assert FALLBACK_GIT_USER.name == "Fountain Coding Agent"
+        assert FALLBACK_GIT_USER.email == "noreply@fountain.com"
 
 
 class TestConfigureGitIdentity:
