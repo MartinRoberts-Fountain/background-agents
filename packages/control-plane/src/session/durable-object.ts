@@ -76,6 +76,10 @@ import { SessionMessageQueue } from "./message-queue";
 import { SessionSandboxEventProcessor } from "./sandbox-events";
 import { createSessionInternalRoutes } from "./http/routes";
 import { createMessagesHandler, type MessagesHandler } from "./http/handlers/messages.handler";
+import {
+  createChildSessionsHandler,
+  type ChildSessionsHandler,
+} from "./http/handlers/child-sessions.handler";
 import { MessageService } from "./services/message.service";
 
 /**
@@ -119,6 +123,8 @@ export class SessionDO extends DurableObject<Env> {
   private _messageService: MessageService | null = null;
   // Messages handler (lazily initialized)
   private _messagesHandler: MessagesHandler | null = null;
+  // Child sessions handler (lazily initialized)
+  private _childSessionsHandler: ChildSessionsHandler | null = null;
   // Sandbox event processor (lazily initialized)
   private _sandboxEventProcessor: SessionSandboxEventProcessor | null = null;
 
@@ -140,10 +146,10 @@ export class SessionDO extends DurableObject<Env> {
     unarchive: (request) => this.handleUnarchive(request),
     verifySandboxToken: (request) => this.handleVerifySandboxToken(request),
     openaiTokenRefresh: () => this.handleOpenAITokenRefresh(),
-    spawnContext: () => this.handleGetSpawnContext(),
-    childSummary: () => this.handleGetChildSummary(),
+    spawnContext: () => this.childSessionsHandler.getSpawnContext(),
+    childSummary: () => this.childSessionsHandler.getChildSummary(),
     cancel: () => this.handleCancel(),
-    childSessionUpdate: (request) => this.handleChildSessionUpdate(request),
+    childSessionUpdate: (request) => this.childSessionsHandler.childSessionUpdate(request),
   });
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -318,6 +324,20 @@ export class SessionDO extends DurableObject<Env> {
     return this._messagesHandler;
   }
 
+  private get childSessionsHandler(): ChildSessionsHandler {
+    if (!this._childSessionsHandler) {
+      this._childSessionsHandler = createChildSessionsHandler({
+        repository: this.repository,
+        getSession: () => this.getSession(),
+        getSandbox: () => this.getSandbox(),
+        getPublicSessionId: (session) => this.getPublicSessionId(session),
+        broadcast: (message) => this.broadcast(message),
+      });
+    }
+
+    return this._childSessionsHandler;
+  }
+
   private get sandboxEventProcessor(): SessionSandboxEventProcessor {
     if (!this._sandboxEventProcessor) {
       this._sandboxEventProcessor = new SessionSandboxEventProcessor({
@@ -389,8 +409,11 @@ export class SessionDO extends DurableObject<Env> {
         tunnelToken: this.env.CLOUDFLARE_TUNNEL_TOKEN || "",
         scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
       });
-    } else if (sandboxProvider === "ec2" && this.env.EC2_API_URL && this.env.EC2_API_SECRET) {
-      // EC2 provider (only when configured)
+    } else if (sandboxProvider === "ec2") {
+      // EC2 provider
+      if (!this.env.EC2_API_URL || !this.env.EC2_API_SECRET) {
+        throw new Error("EC2_API_URL and EC2_API_SECRET are required for EC2 provider");
+      }
       provider = createEC2Provider({
         apiUrl: this.env.EC2_API_URL,
         apiSecret: this.env.EC2_API_SECRET,
@@ -493,7 +516,8 @@ export class SessionDO extends DurableObject<Env> {
     if (this.env.DB) {
       const repoImageStore = new RepoImageStore(this.env.DB);
       repoImageLookup = {
-        getLatestReady: (repoOwner, repoName) => repoImageStore.getLatestReady(repoOwner, repoName),
+        getLatestReady: (repoOwner, repoName, baseBranch) =>
+          repoImageStore.getLatestReady(repoOwner, repoName, baseBranch),
       };
     }
 
@@ -770,6 +794,7 @@ export class SessionDO extends DurableObject<Env> {
           return;
         }
 
+        const isNormalClose = code === 1000 || code === 1001;
         if (isNormalClose) {
           this.updateSandboxStatus("stopped");
         } else {
@@ -2096,6 +2121,7 @@ export class SessionDO extends DurableObject<Env> {
       reasoningEffort: session.reasoning_effort,
       mode: session.mode,
       sandboxProvider: session.sandbox_provider as "modal" | "helm" | "ec2" | null,
+      baseBranch: session.base_branch,
       owner: {
         userId: owner.user_id,
         scmLogin: owner.scm_login,

@@ -522,6 +522,7 @@ export interface SpawnContext {
   reasoningEffort: string | null;
   mode: "plan" | "apply" | null;
   sandboxProvider: "modal" | "helm" | "ec2" | null;
+  baseBranch: string | null;
   owner: {
     userId: string;
     scmLogin: string | null;
