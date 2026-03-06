@@ -140,6 +140,7 @@ export class SessionDO extends DurableObject<Env> {
     unarchive: (request) => this.handleUnarchive(request),
     verifySandboxToken: (request) => this.handleVerifySandboxToken(request),
     openaiTokenRefresh: () => this.handleOpenAITokenRefresh(),
+    vcsTokenRefresh: () => this.handleVcsTokenRefresh(),
     spawnContext: () => this.handleGetSpawnContext(),
     childSummary: () => this.handleGetChildSummary(),
     cancel: () => this.handleCancel(),
@@ -1628,6 +1629,41 @@ export class SessionDO extends DurableObject<Env> {
       status,
       headers: { "Content-Type": "application/json" },
     });
+  }
+
+  /**
+   * Handle VCS (GitHub App) token refresh for the sandbox.
+   * Generates a fresh installation token for git operations.
+   */
+  private async handleVcsTokenRefresh(): Promise<Response> {
+    try {
+      const pushAuth = await this.sourceControlProvider.generatePushAuth();
+      this.log.info("VCS token refreshed for sandbox");
+
+      return new Response(
+        JSON.stringify({
+          token: pushAuth.token,
+          authType: pushAuth.authType,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    } catch (error) {
+      this.log.error("VCS token refresh failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return new Response(
+        JSON.stringify({
+          error: error instanceof Error ? error.message : "Failed to generate VCS token",
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
   }
 
   private updateSandboxStatus(status: string): void {
