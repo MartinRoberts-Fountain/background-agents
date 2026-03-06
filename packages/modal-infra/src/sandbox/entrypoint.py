@@ -990,6 +990,41 @@ class SandboxSupervisor:
                     commits_behind=commits_behind,
                     current_branch=current_branch,
                 )
+
+                if commits_behind > 0:
+                    self.log.info("git.snapshot_rebase_start", commits_behind=commits_behind)
+                    rebase_result = await asyncio.create_subprocess_exec(
+                        "git",
+                        "rebase",
+                        f"origin/{current_branch}",
+                        cwd=self.repo_path,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    rebase_stdout, rebase_stderr = await rebase_result.communicate()
+
+                    if rebase_result.returncode != 0:
+                        # Rebase failed (likely conflicts), abort to keep workspace usable
+                        rebase_merge = self.repo_path / ".git" / "rebase-merge"
+                        rebase_apply = self.repo_path / ".git" / "rebase-apply"
+                        if rebase_merge.exists() or rebase_apply.exists():
+                            await asyncio.create_subprocess_exec(
+                                "git",
+                                "rebase",
+                                "--abort",
+                                cwd=self.repo_path,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                        self.log.error(
+                            "git.snapshot_rebase_error",
+                            base_branch=current_branch,
+                            exit_code=rebase_result.returncode,
+                            rebase_stdout_tail=self._tail_text(rebase_stdout),
+                            rebase_stderr_tail=self._tail_text(rebase_stderr),
+                        )
+                    else:
+                        self.log.info("git.snapshot_rebase_complete")
             else:
                 self.log.debug("git.snapshot_status_unknown", reason="no_upstream")
 
