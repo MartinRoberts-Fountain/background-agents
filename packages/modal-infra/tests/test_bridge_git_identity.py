@@ -185,8 +185,6 @@ class TestConfigureGitIdentity:
         bridge: AgentBridge,
         tmp_path,
     ):
-        repo_dir = tmp_path / "repo"
-        (repo_dir / ".git").mkdir(parents=True)
         bridge.repo_path = tmp_path
 
         name_proc = MagicMock()
@@ -209,20 +207,20 @@ class TestConfigureGitIdentity:
                 call(
                     "git",
                     "config",
-                    "--local",
+                    "--global",
                     "user.name",
                     "Jane Dev",
-                    cwd=repo_dir,
+                    cwd=tmp_path,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 ),
                 call(
                     "git",
                     "config",
-                    "--local",
+                    "--global",
                     "user.email",
                     "jane@example.com",
-                    cwd=repo_dir,
+                    cwd=tmp_path,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                 ),
@@ -235,8 +233,6 @@ class TestConfigureGitIdentity:
         bridge: AgentBridge,
         tmp_path,
     ):
-        repo_dir = tmp_path / "repo"
-        (repo_dir / ".git").mkdir(parents=True)
         bridge.repo_path = tmp_path
         bridge.log = MagicMock()
 
@@ -261,8 +257,6 @@ class TestConfigureGitIdentity:
         bridge: AgentBridge,
         tmp_path,
     ):
-        repo_dir = tmp_path / "repo"
-        (repo_dir / ".git").mkdir(parents=True)
         bridge.repo_path = tmp_path
         bridge.log = MagicMock()
 

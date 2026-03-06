@@ -1585,18 +1585,11 @@ class AgentBridge:
         """Configure git identity for commit attribution."""
         self.log.debug("git.identity_configure", git_name=user.name, git_email=user.email)
 
-        repo_dirs = list(self.repo_path.glob("*/.git"))
-        if not repo_dirs:
-            self.log.debug("git.identity_skip", reason="no_repository")
-            return
-
-        repo_dir = repo_dirs[0].parent
-
         async def _run_git_config(*args: str) -> None:
-            cmd = ["git", "config", "--local", *args]
+            cmd = ["git", "config", "--global", *args]
             process = await asyncio.create_subprocess_exec(
                 *cmd,
-                cwd=repo_dir,
+                cwd=self.repo_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
