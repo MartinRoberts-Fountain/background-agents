@@ -34,26 +34,6 @@ Create the following directories with appropriate permissions:
 - `/etc/cloudflared/` (for tunnel configuration)
 - `/etc/opencode/` (for environment variables)
 
-### Systemd Units
-
-#### Cloudflare Tunnel (`/etc/systemd/system/cloudflared.service`)
-
-Configure `cloudflared` to read the token from `/etc/cloudflared/token`.
-
-```ini
-[Unit]
-Description=Cloudflare Tunnel
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run --token-file /etc/cloudflared/token
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target
-```
-
 #### Sandbox Supervisor (`/etc/systemd/system/sandbox-supervisor.service`)
 
 The supervisor manages the lifecycle of the OpenCode server and the agent bridge.

@@ -306,8 +306,11 @@ systemctl restart sandbox-supervisor
       MinCount: "1",
       MaxCount: "1",
       KeyName: "development-am",
-      SecurityGroupIds: ["sg-064453e70f4d22ea9"],
+      "SecurityGroupId.1": "sg-064453e70f4d22ea9",
       UserData: userData,
+      InstanceMarketOptions: {
+        MarketType: "spot",
+      },
       TagSpecification: [
         {
           ResourceType: "instance",

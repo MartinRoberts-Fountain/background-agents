@@ -640,7 +640,8 @@ class SandboxSupervisor:
 
     async def _report_fatal_error(self, message: str) -> None:
         """Report a fatal error to the control plane."""
-        self.log.error("supervisor.fatal", message=message)
+        # "message" is a reserved LogRecord field; use a custom key.
+        self.log.error("supervisor.fatal", fatal_error=message)
 
         if not self.control_plane_url:
             return
