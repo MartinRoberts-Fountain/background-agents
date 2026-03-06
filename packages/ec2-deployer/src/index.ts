@@ -83,7 +83,10 @@ export default {
     }
 
     if (
-      (url.pathname === "/stop" || url.pathname === "/start" || url.pathname === "/delete") &&
+      (url.pathname === "/stop" ||
+        url.pathname === "/start" ||
+        url.pathname === "/touch" ||
+        url.pathname === "/delete") &&
       request.method === "POST"
     ) {
       // Parse from a clone so we can forward the original (single-use) body to the DO
@@ -168,6 +171,9 @@ export class EC2InstanceDO extends DurableObject<Env> {
     if (url.pathname === "/start") {
       return this.handleStart();
     }
+    if (url.pathname === "/touch") {
+      return this.handleTouch();
+    }
     if (url.pathname === "/delete") {
       return this.handleDelete();
     }
@@ -176,17 +182,24 @@ export class EC2InstanceDO extends DurableObject<Env> {
   }
 
   private async handleDeploy(request: Request): Promise<Response> {
+    const body = (await request.json()) as DeployBody;
+
     if (this.instanceId) {
+      // If instance exists but is stopped, start it
+      if (this.status === "stopped") {
+        await this.handleStart();
+      } else {
+        await this.resetAutoTeardown();
+      }
+
       return Response.json({
         success: true,
-        sandboxId: ((await request.json()) as DeployBody).sandboxId,
+        sandboxId: body.sandboxId,
         providerObjectId: this.ctx.id.toString(),
         status: this.status,
         createdAt: this.createdAt,
       });
     }
-
-    const body = (await request.json()) as DeployBody;
     this.createdAt = Date.now();
     await this.ctx.storage.put("createdAt", this.createdAt);
 
@@ -212,8 +225,8 @@ export class EC2InstanceDO extends DurableObject<Env> {
       this.status = "running";
       await this.ctx.storage.put("status", this.status);
 
-      // 4. Schedule 24-hour auto-teardown
-      await this.ctx.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000);
+      // 4. Schedule 8-hour auto-teardown
+      await this.resetAutoTeardown();
 
       return Response.json({
         success: true,
@@ -239,6 +252,7 @@ export class EC2InstanceDO extends DurableObject<Env> {
     await this.awsRequest("StopInstances", { InstanceId: [this.instanceId] });
     this.status = "stopped";
     await this.ctx.storage.put("status", this.status);
+    await this.resetAutoTeardown();
     return Response.json({ success: true });
   }
 
@@ -250,7 +264,20 @@ export class EC2InstanceDO extends DurableObject<Env> {
     await this.ctx.storage.put("status", this.status);
     // After starting, wait for the tunnel to come back online
     await this.waitForTunnelOnline(this.tunnelId!);
+    await this.resetAutoTeardown();
     return Response.json({ success: true });
+  }
+
+  private async handleTouch(): Promise<Response> {
+    if (!this.instanceId)
+      return Response.json({ success: false, error: "No instance" }, { status: 404 });
+    await this.resetAutoTeardown();
+    return Response.json({ success: true });
+  }
+
+  private async resetAutoTeardown() {
+    // 8-hour auto-teardown
+    await this.ctx.storage.setAlarm(Date.now() + 8 * 60 * 60 * 1000);
   }
 
   private async handleDelete(): Promise<Response> {

@@ -4,6 +4,8 @@ import type { SandboxEvent, ServerMessage } from "../types";
 
 function createProcessor() {
   const repository = {
+    getSession: vi.fn(() => null as any),
+    getPendingOrProcessingCount: vi.fn(() => 0),
     updateSandboxHeartbeat: vi.fn(),
     getProcessingMessage: vi.fn(() => null as { id: string } | null),
     upsertTokenEvent: vi.fn(),
@@ -29,6 +31,7 @@ function createProcessor() {
 
   const broadcast = vi.fn((_message: ServerMessage) => {});
   const triggerSnapshot = vi.fn(async (_reason: string) => {});
+  const stopSandbox = vi.fn(async (_reason: string) => {});
   const reconcileSessionStatusAfterExecution = vi.fn(async (_success: boolean) => {});
   const scheduleInactivityCheck = vi.fn(async () => {});
   const processMessageQueue = vi.fn(async () => {});
@@ -55,6 +58,7 @@ function createProcessor() {
     updateLastActivity,
     scheduleInactivityCheck,
     processMessageQueue,
+    stopSandbox,
   });
 
   return {
@@ -64,6 +68,7 @@ function createProcessor() {
     callbackService,
     broadcast,
     triggerSnapshot,
+    stopSandbox,
     reconcileSessionStatusAfterExecution,
     scheduleInactivityCheck,
     processMessageQueue,
