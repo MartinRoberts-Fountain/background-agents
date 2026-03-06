@@ -335,6 +335,7 @@ export class SessionDO extends DurableObject<Env> {
         updateLastActivity: (timestamp) => this.updateLastActivity(timestamp),
         scheduleInactivityCheck: () => this.scheduleInactivityCheck(),
         processMessageQueue: () => this.messageQueue.processMessageQueue(),
+        stopSandbox: (reason) => this.lifecycleManager.stopSandbox(reason),
       });
     }
 
@@ -426,6 +427,11 @@ export class SessionDO extends DurableObject<Env> {
       startSandbox: async (providerObjectId) => {
         if ("startSandbox" in provider && typeof provider.startSandbox === "function") {
           await provider.startSandbox(providerObjectId);
+        }
+      },
+      touchSandbox: async (providerObjectId) => {
+        if ("touchSandbox" in provider && typeof provider.touchSandbox === "function") {
+          await provider.touchSandbox(providerObjectId);
         }
       },
       incrementCircuitBreakerFailure: (timestamp) =>

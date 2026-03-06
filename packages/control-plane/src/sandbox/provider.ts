@@ -311,4 +311,11 @@ export interface SandboxProvider {
    * @param providerObjectId - Provider's internal object ID
    */
   startSandbox?(providerObjectId: string): Promise<void>;
+
+  /**
+   * Reset the inactivity timer for the sandbox provider.
+   *
+   * @param providerObjectId - Provider's internal object ID
+   */
+  touchSandbox?(providerObjectId: string): Promise<void>;
 }

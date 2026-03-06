@@ -22,6 +22,7 @@ interface SessionSandboxEventProcessorDeps {
   updateLastActivity: (timestamp: number) => void;
   scheduleInactivityCheck: () => Promise<void>;
   processMessageQueue: () => Promise<void>;
+  stopSandbox: (reason: string) => Promise<void>;
 }
 
 /** Event types that require delivery acknowledgement. */
@@ -160,9 +161,23 @@ export class SessionSandboxEventProcessor {
         });
       }
 
-      this.deps.ctx.waitUntil(this.deps.triggerSnapshot("execution_complete"));
+      // If EC2 provider and no more pending messages, stop immediately.
+      // We check both the explicit provider override and the mode-based default.
+      const session = this.deps.repository.getSession();
+      const pendingCount = this.deps.repository.getPendingOrProcessingCount();
+      const isEC2 =
+        session?.sandbox_provider === "ec2" ||
+        (!session?.sandbox_provider && session?.mode === "apply");
+
+      if (isEC2 && pendingCount === 0) {
+        this.deps.log.info("Execution complete on EC2, stopping idle sandbox");
+        this.deps.ctx.waitUntil(this.deps.stopSandbox("execution_complete"));
+      } else {
+        this.deps.ctx.waitUntil(this.deps.triggerSnapshot("execution_complete"));
+        await this.deps.scheduleInactivityCheck();
+      }
+
       this.deps.updateLastActivity(now);
-      await this.deps.scheduleInactivityCheck();
       await this.deps.processMessageQueue();
       this.sendAck(ackId);
       return;

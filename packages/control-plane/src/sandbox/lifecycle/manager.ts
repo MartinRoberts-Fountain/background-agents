@@ -78,6 +78,8 @@ export interface SandboxStorage {
   stopSandbox?(providerObjectId: string): Promise<void>;
   /** Start the sandbox */
   startSandbox?(providerObjectId: string): Promise<void>;
+  /** Touch the sandbox (reset provider-side alarm) */
+  touchSandbox?(providerObjectId: string): Promise<void>;
   /** Increment circuit breaker failure count */
   incrementCircuitBreakerFailure(timestamp: number): void;
   /** Reset circuit breaker failure count */
@@ -284,32 +286,54 @@ export class SandboxLifecycleManager {
         this.log.info("Spawn decision: restore", {
           snapshot_image_id: spawnDecision.snapshotImageId,
         });
-        // If the sandbox is stopped and we have a provider object ID (EC2 instance ID), try to resume it
-        // Only applicable for EC2 provider
-        const sandboxState = this.storage.getSandbox();
-        if (
-          this.provider.name === "ec2" &&
-          sandboxState?.status === "stopped" &&
-          sandboxState.modal_object_id &&
-          this.storage.startSandbox
-        ) {
-          try {
-            await this.storage.startSandbox(sandboxState.modal_object_id);
-            this.storage.updateSandboxStatus("connecting");
-            this.broadcaster.broadcast({ type: "sandbox_status", status: "connecting" });
-            return;
-          } catch (e) {
-            this.log.error("Failed to start EC2 instance, falling back to spawn", { error: e });
-          }
+
+        // Resume stopped EC2 instance if possible
+        if (await this.tryResumeEC2()) {
+          return;
         }
+
         await this.restoreFromSnapshot(spawnDecision.snapshotImageId);
         return;
       }
 
       case "spawn":
+        // Resume stopped EC2 instance if possible
+        if (await this.tryResumeEC2()) {
+          return;
+        }
+
         await this.doSpawn();
         return;
     }
+  }
+
+  /**
+   * Try to resume a stopped EC2 instance.
+   * @returns true if resumed, false if not an EC2 instance or failed to resume.
+   */
+  private async tryResumeEC2(): Promise<boolean> {
+    const sandboxState = this.storage.getSandbox();
+    if (
+      this.provider.name === "ec2" &&
+      sandboxState?.status === "stopped" &&
+      sandboxState.modal_object_id &&
+      this.storage.startSandbox
+    ) {
+      try {
+        this.log.info("Resuming stopped EC2 instance", {
+          modal_object_id: sandboxState.modal_object_id,
+        });
+        await this.storage.startSandbox(sandboxState.modal_object_id);
+        this.storage.updateSandboxStatus("connecting");
+        this.broadcaster.broadcast({ type: "sandbox_status", status: "connecting" });
+        return true;
+      } catch (e) {
+        this.log.error("Failed to start EC2 instance, falling back to spawn/restore", {
+          error: e,
+        });
+      }
+    }
+    return false;
   }
 
   /**
@@ -642,6 +666,44 @@ export class SandboxLifecycleManager {
   }
 
   /**
+   * Shutdown the sandbox (snapshot, status update, provider stop).
+   */
+  async stopSandbox(reason: string): Promise<void> {
+    const sandbox = this.storage.getSandbox();
+    if (!sandbox) return;
+
+    if (sandbox.status === "stopped" || sandbox.status === "stale" || sandbox.status === "failed") {
+      this.log.debug("stopSandbox: sandbox already in terminal state", { status: sandbox.status });
+      return;
+    }
+
+    this.log.info("Stopping sandbox", { event: "sandbox.stop_requested", reason });
+
+    // Fail any stuck processing message before terminating
+    await this.callbacks.onSandboxTerminating?.();
+
+    // Set status to stopped FIRST to block reconnection attempts
+    this.storage.updateSandboxStatus("stopped");
+    this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
+
+    // Take snapshot (best effort)
+    await this.triggerSnapshot(reason);
+
+    // Send shutdown command and close WebSocket
+    this.wsManager.sendToSandbox({ type: "shutdown" });
+    this.wsManager.closeSandboxWebSocket(1000, reason);
+
+    // Stop provider instance if applicable
+    if (sandbox.modal_object_id && this.storage.stopSandbox) {
+      try {
+        await this.storage.stopSandbox(sandbox.modal_object_id);
+      } catch (e) {
+        this.log.error("Failed to stop sandbox provider instance", { error: e });
+      }
+    }
+  }
+
+  /**
    * Handle alarm for inactivity and heartbeat monitoring.
    */
   async handleAlarm(): Promise<void> {
@@ -718,28 +780,8 @@ export class SandboxLifecycleManager {
           last_activity: sandbox.last_activity,
           timeout_ms: this.config.inactivity.timeoutMs,
         });
-        // Fail any stuck processing message before terminating
-        await this.callbacks.onSandboxTerminating?.();
-        // Set status to stopped FIRST to block reconnection attempts
-        this.storage.updateSandboxStatus("stopped");
-        this.broadcaster.broadcast({ type: "sandbox_status", status: "stopped" });
 
-        // Take snapshot
-        await this.triggerSnapshot("inactivity_timeout");
-
-        // Send shutdown command and close WebSocket
-        this.wsManager.sendToSandbox({ type: "shutdown" });
-        this.wsManager.closeSandboxWebSocket(1000, "Inactivity timeout");
-
-        // Stop EC2 instance if applicable
-        // Only applicable for EC2 provider
-        if (this.provider.name === "ec2" && sandbox.modal_object_id && this.storage.stopSandbox) {
-          try {
-            await this.storage.stopSandbox(sandbox.modal_object_id);
-          } catch (e) {
-            this.log.error("Failed to stop EC2 instance", { error: e });
-          }
-        }
+        await this.stopSandbox("inactivity_timeout");
 
         this.broadcaster.broadcast({
           type: "sandbox_warning",
@@ -797,7 +839,25 @@ export class SandboxLifecycleManager {
    * Update last activity timestamp.
    */
   updateLastActivity(timestamp: number): void {
+    const sandbox = this.storage.getSandbox();
+    const previousActivity = sandbox?.last_activity || 0;
+
     this.storage.updateSandboxLastActivity(timestamp);
+
+    // If we crossed a 30-minute boundary since the last activity, touch the provider.
+    // This keeps the EC2 instance alive if there is continuous high-frequency activity
+    // that would otherwise never trigger the (timestamp - lastActivity > 30m) check.
+    const INTERVAL_MS = 30 * 60 * 1000;
+    if (
+      this.provider.name === "ec2" &&
+      sandbox?.modal_object_id &&
+      this.storage.touchSandbox &&
+      Math.floor(timestamp / INTERVAL_MS) > Math.floor(previousActivity / INTERVAL_MS)
+    ) {
+      this.storage.touchSandbox(sandbox.modal_object_id).catch((e) => {
+        this.log.error("Failed to touch EC2 instance", { error: e });
+      });
+    }
   }
 
   /**

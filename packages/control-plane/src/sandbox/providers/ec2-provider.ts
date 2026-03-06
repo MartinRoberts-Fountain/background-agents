@@ -108,6 +108,21 @@ export class EC2ApiClient {
     return (await response.json()) as { success: boolean };
   }
 
+  async touch(providerObjectId: string): Promise<{ success: boolean }> {
+    const response = await fetch(`${this.config.apiUrl}/touch`, {
+      method: "POST",
+      headers: await this.getHeaders(),
+      body: JSON.stringify({ providerObjectId }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`EC2 deployer error: ${response.status} ${text}`);
+    }
+
+    return (await response.json()) as { success: boolean };
+  }
+
   async start(providerObjectId: string): Promise<{ success: boolean }> {
     const response = await fetch(`${this.config.apiUrl}/start`, {
       method: "POST",
@@ -145,6 +160,11 @@ export class EC2SandboxProvider implements SandboxProvider {
   async startSandbox(providerObjectId: string): Promise<void> {
     const result = await this.client.start(providerObjectId);
     if (!result.success) throw new Error("Failed to start EC2 instance");
+  }
+
+  async touchSandbox(providerObjectId: string): Promise<void> {
+    const result = await this.client.touch(providerObjectId);
+    if (!result.success) throw new Error("Failed to touch EC2 instance");
   }
 
   async createSandbox(config: CreateSandboxConfig): Promise<CreateSandboxResult> {
