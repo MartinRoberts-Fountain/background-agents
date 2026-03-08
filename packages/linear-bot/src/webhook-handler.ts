@@ -640,34 +640,7 @@ export async function handleIssueStatusChange(
     new_state: issueData.state.name,
   });
 
-  // Fetch plan output from the existing plan session
   const headers = await getAuthHeaders(env, traceId);
-  let planContent = "";
-  try {
-    const eventsRes = await env.CONTROL_PLANE.fetch(
-      `https://internal/sessions/${existingSession.sessionId}/events?limit=100`,
-      { method: "GET", headers }
-    );
-    if (eventsRes.ok) {
-      const eventsData = (await eventsRes.json()) as {
-        events: Array<{ type: string; data: Record<string, unknown> }>;
-      };
-      // Collect all token events to reconstruct the plan output
-      const tokenContents = eventsData.events
-        .filter((e) => e.type === "token")
-        .map((e) => String(e.data.content ?? ""))
-        .filter(Boolean);
-      if (tokenContents.length > 0) {
-        planContent = tokenContents.join("");
-      }
-    }
-  } catch (e) {
-    log.warn("issue_status_change.plan_fetch_failed", {
-      trace_id: traceId,
-      plan_session_id: existingSession.sessionId,
-      error: e instanceof Error ? e.message : String(e),
-    });
-  }
 
   // Stop the old plan session (best effort)
   try {
@@ -749,7 +722,8 @@ export async function handleIssueStatusChange(
     createdAt: Date.now(),
   });
 
-  // Build prompt with plan context
+  // Build prompt — plan output is already on the Linear ticket and will be
+  // included in promptContext for new agent sessions automatically.
   const promptParts: string[] = [
     `Linear Issue: ${issueData.identifier} — ${issueData.title}`,
     `URL: ${issueData.url}`,
@@ -762,13 +736,9 @@ export async function handleIssueStatusChange(
     promptParts.push("(No description provided)");
   }
 
-  if (planContent) {
-    promptParts.push("", "---", "**Implementation plan from planning session:**", "", planContent);
-  }
-
   promptParts.push(
     "",
-    "IMPORTANT: You are in APPLY mode. A planning session has already analyzed this issue and produced the plan above. Create a new branch off the base branch, implement the changes according to the plan, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a separate pull request."
+    "IMPORTANT: You are in APPLY mode. A planning session has already analyzed this issue and produced a plan. Create a new branch off the base branch, implement the changes according to the plan, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a separate pull request."
   );
 
   const callbackContext: CallbackContext = {
@@ -832,7 +802,6 @@ export async function handleIssueStatusChange(
     issue_identifier: issueData.identifier,
     repo: repoFullName,
     model,
-    has_plan_content: Boolean(planContent),
     duration_ms: Date.now() - startTime,
   });
 }

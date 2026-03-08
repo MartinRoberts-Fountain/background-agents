@@ -321,16 +321,6 @@ describe("Issue Status Change → Apply Trigger", () => {
       if (url === "https://internal/sessions") {
         return { ok: true, json: async () => ({ sessionId: "sess-apply-1" }) };
       }
-      if (url.includes("/events")) {
-        return {
-          ok: true,
-          json: async () => ({
-            events: [
-              { type: "token", data: { content: "## Plan\n1. Modify foo.ts\n2. Add tests" } },
-            ],
-          }),
-        };
-      }
       if (url.includes("/prompt")) {
         return { ok: true };
       }
@@ -408,11 +398,11 @@ describe("Issue Status Change → Apply Trigger", () => {
       })
     );
 
-    // Should send prompt with plan content
+    // Should send prompt to the new session
     expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
       "https://internal/sessions/sess-apply-1/prompt",
       expect.objectContaining({
-        body: expect.stringContaining("Implementation plan from planning session"),
+        body: expect.stringContaining("APPLY mode"),
       })
     );
 
