@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { escapeHtml, handleAgentSessionEvent } from "./webhook-handler";
-import { lookupIssueSession } from "./kv-store";
+import { escapeHtml, handleAgentSessionEvent, handleIssueStatusChange } from "./webhook-handler";
+import { lookupIssueSession, storeIssueSession } from "./kv-store";
 import { fetchIssueDetails } from "./utils/linear-client";
 
 vi.mock("./kv-store", () => ({
@@ -275,5 +275,242 @@ describe("Follow-up bot content skip", () => {
     await handleAgentSessionEvent(webhook, env, "trace-1");
 
     expect(env.CONTROL_PLANE.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("Issue Status Change → Apply Trigger", () => {
+  const env = {
+    LINEAR_KV: {
+      get: vi.fn(),
+      put: vi.fn(),
+      delete: vi.fn(),
+    },
+    CONTROL_PLANE: {
+      fetch: vi.fn(),
+    },
+    LINEAR_CLIENT_ID: "client-id",
+    LINEAR_CLIENT_SECRET: "client-secret",
+    WORKER_URL: "https://worker.url",
+    WEB_APP_URL: "https://web.app",
+    DEFAULT_MODEL: "claude-sonnet-4-5",
+    LINEAR_WEBHOOK_SECRET: "webhook-secret",
+  } as any;
+
+  const baseIssueUpdateWebhook = {
+    type: "Issue" as const,
+    action: "update" as const,
+    organizationId: "org-1",
+    data: {
+      id: "issue-1",
+      identifier: "ENG-1",
+      title: "Test issue",
+      url: "https://linear.app/issue/ENG-1",
+      priority: 1,
+      priorityLabel: "Urgent",
+      state: { id: "state-todo", name: "Todo", type: "started" },
+      teamId: "team-1",
+      team: { id: "team-1", key: "ENG", name: "Engineering" },
+    },
+    updatedFrom: { stateId: "state-backlog" },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (lookupIssueSession as any).mockResolvedValue(null);
+    env.CONTROL_PLANE.fetch.mockImplementation(async (url: string) => {
+      if (url === "https://internal/sessions") {
+        return { ok: true, json: async () => ({ sessionId: "sess-apply-1" }) };
+      }
+      if (url.includes("/prompt")) {
+        return { ok: true };
+      }
+      if (url.includes("/stop")) {
+        return { ok: true };
+      }
+      if (url.includes("/integration-settings")) {
+        return {
+          ok: true,
+          json: async () => ({
+            config: {
+              model: null,
+              reasoningEffort: null,
+              allowUserPreferenceOverride: true,
+              allowLabelModelOverride: true,
+              emitToolProgressActivities: true,
+              enabledRepos: null,
+            },
+          }),
+        };
+      }
+      return { ok: true };
+    });
+  });
+
+  it("triggers apply session when status changes to Todo with existing plan session", async () => {
+    (lookupIssueSession as any).mockResolvedValue({
+      sessionId: "sess-plan-1",
+      issueId: "issue-1",
+      issueIdentifier: "ENG-1",
+      repoOwner: "org",
+      repoName: "repo",
+      model: "claude-sonnet-4-5",
+      agentSessionId: "as-1",
+      mode: "plan",
+      createdAt: Date.now(),
+    });
+
+    (fetchIssueDetails as any).mockResolvedValue({
+      id: "issue-1",
+      identifier: "ENG-1",
+      title: "Test issue",
+      url: "https://linear.app/issue/ENG-1",
+      state: { name: "Todo" },
+      labels: [],
+      comments: [],
+      team: { id: "team-1", key: "ENG", name: "Engineering" },
+    });
+
+    await handleIssueStatusChange(baseIssueUpdateWebhook, env, "trace-1");
+
+    // Should create a new session in apply mode
+    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
+      "https://internal/sessions",
+      expect.objectContaining({
+        body: expect.stringContaining('"mode":"apply"'),
+      })
+    );
+
+    // Should use ec2 sandbox
+    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
+      "https://internal/sessions",
+      expect.objectContaining({
+        body: expect.stringContaining('"sandboxProvider":"ec2"'),
+      })
+    );
+
+    // Should store the new session
+    expect(storeIssueSession).toHaveBeenCalledWith(
+      env,
+      "issue-1",
+      expect.objectContaining({
+        sessionId: "sess-apply-1",
+        mode: "apply",
+      })
+    );
+
+    // Should send prompt to the new session
+    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
+      "https://internal/sessions/sess-apply-1/prompt",
+      expect.objectContaining({
+        body: expect.stringContaining("APPLY mode"),
+      })
+    );
+
+    // Should stop the old plan session
+    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
+      "https://internal/sessions/sess-plan-1/stop",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("skips when status changes to non-Todo state", async () => {
+    const webhook = {
+      ...baseIssueUpdateWebhook,
+      data: {
+        ...baseIssueUpdateWebhook.data,
+        state: { id: "state-ip", name: "In Progress", type: "started" },
+      },
+    };
+
+    await handleIssueStatusChange(webhook, env, "trace-1");
+
+    expect(env.CONTROL_PLANE.fetch).not.toHaveBeenCalledWith(
+      "https://internal/sessions",
+      expect.anything()
+    );
+  });
+
+  it("skips when no stateId in updatedFrom", async () => {
+    const webhook = {
+      ...baseIssueUpdateWebhook,
+      updatedFrom: { title: "Old title" },
+    };
+
+    await handleIssueStatusChange(webhook, env, "trace-1");
+
+    expect(env.CONTROL_PLANE.fetch).not.toHaveBeenCalledWith(
+      "https://internal/sessions",
+      expect.anything()
+    );
+  });
+
+  it("skips when no existing plan session", async () => {
+    (lookupIssueSession as any).mockResolvedValue(null);
+
+    await handleIssueStatusChange(baseIssueUpdateWebhook, env, "trace-1");
+
+    expect(env.CONTROL_PLANE.fetch).not.toHaveBeenCalledWith(
+      "https://internal/sessions",
+      expect.anything()
+    );
+  });
+
+  it("skips when existing session is apply mode (not plan)", async () => {
+    (lookupIssueSession as any).mockResolvedValue({
+      sessionId: "sess-apply-old",
+      issueId: "issue-1",
+      mode: "apply",
+      repoOwner: "org",
+      repoName: "repo",
+    });
+
+    await handleIssueStatusChange(baseIssueUpdateWebhook, env, "trace-1");
+
+    expect(env.CONTROL_PLANE.fetch).not.toHaveBeenCalledWith(
+      "https://internal/sessions",
+      expect.anything()
+    );
+  });
+
+  it("handles 'To Do' with space as valid trigger status", async () => {
+    const webhook = {
+      ...baseIssueUpdateWebhook,
+      data: {
+        ...baseIssueUpdateWebhook.data,
+        state: { id: "state-todo", name: "To Do", type: "started" },
+      },
+    };
+
+    (lookupIssueSession as any).mockResolvedValue({
+      sessionId: "sess-plan-1",
+      issueId: "issue-1",
+      issueIdentifier: "ENG-1",
+      repoOwner: "org",
+      repoName: "repo",
+      model: "claude-sonnet-4-5",
+      agentSessionId: "as-1",
+      mode: "plan",
+      createdAt: Date.now(),
+    });
+
+    (fetchIssueDetails as any).mockResolvedValue({
+      id: "issue-1",
+      identifier: "ENG-1",
+      title: "Test issue",
+      url: "https://linear.app/issue/ENG-1",
+      state: { name: "To Do" },
+      labels: [],
+      comments: [],
+      team: { id: "team-1", key: "ENG", name: "Engineering" },
+    });
+
+    await handleIssueStatusChange(webhook, env, "trace-1");
+
+    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
+      "https://internal/sessions",
+      expect.objectContaining({
+        body: expect.stringContaining('"mode":"apply"'),
+      })
+    );
   });
 });
