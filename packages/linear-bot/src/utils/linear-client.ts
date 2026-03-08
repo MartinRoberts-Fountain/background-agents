@@ -289,6 +289,34 @@ export async function updateAgentSession(
 }
 
 /**
+ * Create a new agent session on an issue. This triggers Linear to send a new
+ * AgentSessionEvent webhook with promptContext containing the issue's full context
+ * (including any plan activities posted by previous sessions).
+ */
+export async function createAgentSessionOnIssue(
+  client: LinearApiClient,
+  issueId: string
+): Promise<string> {
+  const data = await linearGraphQL(
+    client,
+    `
+      mutation AgentSessionCreateOnIssue($input: AgentSessionCreateOnIssue!) {
+        agentSessionCreateOnIssue(input: $input) {
+          agentSession { id }
+          success
+        }
+      }
+    `,
+    { input: { issueId } }
+  );
+  const result = data.agentSessionCreateOnIssue;
+  if (!result?.success) {
+    throw new Error("agentSessionCreateOnIssue returned success=false");
+  }
+  return result.agentSession.id;
+}
+
+/**
  * Use Linear's built-in repo suggestion API for issue→repo matching.
  */
 export async function getRepoSuggestions(

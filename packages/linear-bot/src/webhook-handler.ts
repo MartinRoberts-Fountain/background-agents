@@ -17,6 +17,7 @@ import {
   fetchIssueDetails,
   updateAgentSession,
   getRepoSuggestions,
+  createAgentSessionOnIssue,
 } from "./utils/linear-client";
 import { generateInternalToken } from "./utils/internal";
 import { classifyRepo } from "./classifier";
@@ -640,9 +641,8 @@ export async function handleIssueStatusChange(
     new_state: issueData.state.name,
   });
 
-  const headers = await getAuthHeaders(env, traceId);
-
   // Stop the old plan session (best effort)
+  const headers = await getAuthHeaders(env, traceId);
   try {
     await env.CONTROL_PLANE.fetch(`https://internal/sessions/${existingSession.sessionId}/stop`, {
       method: "POST",
@@ -652,158 +652,30 @@ export async function handleIssueStatusChange(
     /* best effort */
   }
 
-  // Fetch full issue details for label-based model override
-  const issueDetails = await fetchIssueDetails(client, issueData.id);
-  const labels = issueDetails?.labels || issueData.labels || [];
+  // Clear the stored plan session so the incoming AgentSessionEvent creates
+  // a fresh apply-mode session via handleNewSession.
+  await env.LINEAR_KV.delete(`issue:${issueData.id}`);
 
-  // Resolve model settings
-  const integrationConfig = await getLinearConfig(
-    env,
-    `${existingSession.repoOwner}/${existingSession.repoName}`.toLowerCase()
-  );
-  const labelModel = extractModelFromLabels(labels);
-  const { model, reasoningEffort } = resolveSessionModelSettings({
-    envDefaultModel: env.DEFAULT_MODEL,
-    configModel: integrationConfig.model,
-    configReasoningEffort: integrationConfig.reasoningEffort,
-    allowUserPreferenceOverride: integrationConfig.allowUserPreferenceOverride,
-    allowLabelModelOverride: integrationConfig.allowLabelModelOverride,
-    labelModel,
-  });
-
-  // Create new apply-mode session
-  const repoOwner = existingSession.repoOwner;
-  const repoName = existingSession.repoName;
-  const repoFullName = `${repoOwner}/${repoName}`;
-
-  const sessionRes = await env.CONTROL_PLANE.fetch("https://internal/sessions", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      repoOwner,
-      repoName,
-      title: `${issueData.identifier}: ${issueData.title}`,
-      model,
-      reasoningEffort,
-      mode: "apply",
-      sandboxProvider: "ec2",
-    }),
-  });
-
-  if (!sessionRes.ok) {
-    let errBody = "";
-    try {
-      errBody = await sessionRes.text();
-    } catch {
-      /* ignore */
-    }
-    log.error("issue_status_change.create_session_failed", {
+  // Create a new Linear agent session on the issue. This triggers Linear to
+  // send an AgentSessionEvent webhook with promptContext that includes the
+  // plan output (already posted as agent activities on the ticket).
+  try {
+    const newAgentSessionId = await createAgentSessionOnIssue(client, issueData.id);
+    log.info("issue_status_change.agent_session_created", {
       trace_id: traceId,
+      new_agent_session_id: newAgentSessionId,
+      plan_session_id: existingSession.sessionId,
       issue_identifier: issueData.identifier,
-      repo: repoFullName,
-      http_status: sessionRes.status,
-      response_body: errBody.slice(0, 500),
+      duration_ms: Date.now() - startTime,
     });
-    return;
-  }
-
-  const session = (await sessionRes.json()) as { sessionId: string };
-
-  // Store the new session mapping (replaces the plan session)
-  await storeIssueSession(env, issueData.id, {
-    sessionId: session.sessionId,
-    issueId: issueData.id,
-    issueIdentifier: issueData.identifier,
-    repoOwner,
-    repoName,
-    model,
-    agentSessionId: existingSession.agentSessionId,
-    mode: "apply",
-    createdAt: Date.now(),
-  });
-
-  // Build prompt — plan output is already on the Linear ticket and will be
-  // included in promptContext for new agent sessions automatically.
-  const promptParts: string[] = [
-    `Linear Issue: ${issueData.identifier} — ${issueData.title}`,
-    `URL: ${issueData.url}`,
-    "",
-  ];
-
-  if (issueData.description) {
-    promptParts.push(issueData.description);
-  } else {
-    promptParts.push("(No description provided)");
-  }
-
-  promptParts.push(
-    "",
-    "IMPORTANT: You are in APPLY mode. A planning session has already analyzed this issue and produced a plan. Create a new branch off the base branch, implement the changes according to the plan, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a separate pull request."
-  );
-
-  const callbackContext: CallbackContext = {
-    source: "linear",
-    issueId: issueData.id,
-    issueIdentifier: issueData.identifier,
-    issueUrl: issueData.url,
-    repoFullName,
-    model,
-    agentSessionId: existingSession.agentSessionId,
-    organizationId: orgId,
-    emitToolProgressActivities: integrationConfig.emitToolProgressActivities,
-  };
-
-  const promptRes = await env.CONTROL_PLANE.fetch(
-    `https://internal/sessions/${session.sessionId}/prompt`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        content: promptParts.join("\n"),
-        source: "linear",
-        callbackContext,
-      }),
-    }
-  );
-
-  if (!promptRes.ok) {
-    let errBody = "";
-    try {
-      errBody = await promptRes.text();
-    } catch {
-      /* ignore */
-    }
-    log.error("issue_status_change.send_prompt_failed", {
+  } catch (err) {
+    log.error("issue_status_change.agent_session_create_failed", {
       trace_id: traceId,
-      session_id: session.sessionId,
+      issue_id: issueData.id,
       issue_identifier: issueData.identifier,
-      http_status: promptRes.status,
-      response_body: errBody.slice(0, 500),
+      error: err instanceof Error ? err.message : String(err),
     });
-    return;
   }
-
-  // Emit agent activity if we have a stored agentSessionId (best effort)
-  if (existingSession.agentSessionId) {
-    try {
-      await emitAgentActivity(client, existingSession.agentSessionId, {
-        type: "response",
-        body: `Ticket moved to **${issueData.state.name}** — starting apply session on \`${repoFullName}\` with **${model}**.\n\n[View session](${env.WEB_APP_URL}/session/${session.sessionId})`,
-      });
-    } catch {
-      /* best effort */
-    }
-  }
-
-  log.info("issue_status_change.apply_session_created", {
-    trace_id: traceId,
-    session_id: session.sessionId,
-    plan_session_id: existingSession.sessionId,
-    issue_identifier: issueData.identifier,
-    repo: repoFullName,
-    model,
-    duration_ms: Date.now() - startTime,
-  });
 }
 
 // ─── Dispatcher ──────────────────────────────────────────────────────────────

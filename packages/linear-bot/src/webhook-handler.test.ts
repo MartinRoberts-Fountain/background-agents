@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { escapeHtml, handleAgentSessionEvent, handleIssueStatusChange } from "./webhook-handler";
-import { lookupIssueSession, storeIssueSession } from "./kv-store";
-import { fetchIssueDetails } from "./utils/linear-client";
+import { lookupIssueSession } from "./kv-store";
+import { createAgentSessionOnIssue, fetchIssueDetails } from "./utils/linear-client";
 
 vi.mock("./kv-store", () => ({
   lookupIssueSession: vi.fn(),
@@ -17,6 +17,7 @@ vi.mock("./utils/linear-client", () => ({
   fetchIssueDetails: vi.fn(),
   updateAgentSession: vi.fn(),
   getRepoSuggestions: vi.fn(() => []),
+  createAgentSessionOnIssue: vi.fn(() => "new-agent-session-1"),
 }));
 
 vi.mock("./utils/integration-config", () => ({
@@ -317,30 +318,10 @@ describe("Issue Status Change → Apply Trigger", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (lookupIssueSession as any).mockResolvedValue(null);
+    (createAgentSessionOnIssue as any).mockResolvedValue("new-agent-session-1");
     env.CONTROL_PLANE.fetch.mockImplementation(async (url: string) => {
-      if (url === "https://internal/sessions") {
-        return { ok: true, json: async () => ({ sessionId: "sess-apply-1" }) };
-      }
-      if (url.includes("/prompt")) {
-        return { ok: true };
-      }
       if (url.includes("/stop")) {
         return { ok: true };
-      }
-      if (url.includes("/integration-settings")) {
-        return {
-          ok: true,
-          json: async () => ({
-            config: {
-              model: null,
-              reasoningEffort: null,
-              allowUserPreferenceOverride: true,
-              allowLabelModelOverride: true,
-              emitToolProgressActivities: true,
-              enabledRepos: null,
-            },
-          }),
-        };
       }
       return { ok: true };
     });
@@ -359,57 +340,21 @@ describe("Issue Status Change → Apply Trigger", () => {
       createdAt: Date.now(),
     });
 
-    (fetchIssueDetails as any).mockResolvedValue({
-      id: "issue-1",
-      identifier: "ENG-1",
-      title: "Test issue",
-      url: "https://linear.app/issue/ENG-1",
-      state: { name: "Todo" },
-      labels: [],
-      comments: [],
-      team: { id: "team-1", key: "ENG", name: "Engineering" },
-    });
-
     await handleIssueStatusChange(baseIssueUpdateWebhook, env, "trace-1");
-
-    // Should create a new session in apply mode
-    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
-      "https://internal/sessions",
-      expect.objectContaining({
-        body: expect.stringContaining('"mode":"apply"'),
-      })
-    );
-
-    // Should use ec2 sandbox
-    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
-      "https://internal/sessions",
-      expect.objectContaining({
-        body: expect.stringContaining('"sandboxProvider":"ec2"'),
-      })
-    );
-
-    // Should store the new session
-    expect(storeIssueSession).toHaveBeenCalledWith(
-      env,
-      "issue-1",
-      expect.objectContaining({
-        sessionId: "sess-apply-1",
-        mode: "apply",
-      })
-    );
-
-    // Should send prompt to the new session
-    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
-      "https://internal/sessions/sess-apply-1/prompt",
-      expect.objectContaining({
-        body: expect.stringContaining("APPLY mode"),
-      })
-    );
 
     // Should stop the old plan session
     expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
       "https://internal/sessions/sess-plan-1/stop",
       expect.objectContaining({ method: "POST" })
+    );
+
+    // Should clear the stored plan session from KV
+    expect(env.LINEAR_KV.delete).toHaveBeenCalledWith("issue:issue-1");
+
+    // Should create a new Linear agent session on the issue
+    expect(createAgentSessionOnIssue).toHaveBeenCalledWith(
+      expect.objectContaining({ accessToken: "test-token" }),
+      "issue-1"
     );
   });
 
@@ -493,24 +438,12 @@ describe("Issue Status Change → Apply Trigger", () => {
       createdAt: Date.now(),
     });
 
-    (fetchIssueDetails as any).mockResolvedValue({
-      id: "issue-1",
-      identifier: "ENG-1",
-      title: "Test issue",
-      url: "https://linear.app/issue/ENG-1",
-      state: { name: "To Do" },
-      labels: [],
-      comments: [],
-      team: { id: "team-1", key: "ENG", name: "Engineering" },
-    });
-
     await handleIssueStatusChange(webhook, env, "trace-1");
 
-    expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
-      "https://internal/sessions",
-      expect.objectContaining({
-        body: expect.stringContaining('"mode":"apply"'),
-      })
+    // Should create a new Linear agent session
+    expect(createAgentSessionOnIssue).toHaveBeenCalledWith(
+      expect.objectContaining({ accessToken: "test-token" }),
+      "issue-1"
     );
   });
 });
