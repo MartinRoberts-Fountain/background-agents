@@ -9,6 +9,7 @@ import type {
   LinearIssueDetails,
   AgentSessionWebhook,
   AgentSessionWebhookIssue,
+  IssueUpdateWebhook,
 } from "./types";
 import {
   getLinearClient,
@@ -571,6 +572,267 @@ async function handleNewSession(
     mode,
     model,
     classification_reasoning: classificationReasoning,
+    duration_ms: Date.now() - startTime,
+  });
+}
+
+// ─── Issue Status Change → Apply Trigger ─────────────────────────────────────
+
+const PLAN_TRIGGER_STATUSES = new Set(["todo", "to do"]);
+
+export async function handleIssueStatusChange(
+  webhook: IssueUpdateWebhook,
+  env: Env,
+  traceId: string
+): Promise<void> {
+  const startTime = Date.now();
+  const issueData = webhook.data;
+  const newStateName = issueData.state.name.toLowerCase();
+
+  // Only trigger on transitions TO "To Do" / "Todo"
+  if (!PLAN_TRIGGER_STATUSES.has(newStateName)) {
+    log.debug("issue_status_change.ignored_state", {
+      trace_id: traceId,
+      issue_id: issueData.id,
+      new_state: issueData.state.name,
+    });
+    return;
+  }
+
+  // Must have had a stateId change (not just any update)
+  if (!webhook.updatedFrom.stateId) {
+    log.debug("issue_status_change.no_state_change", {
+      trace_id: traceId,
+      issue_id: issueData.id,
+    });
+    return;
+  }
+
+  // Look up existing plan session for this issue
+  const existingSession = await lookupIssueSession(env, issueData.id);
+  if (!existingSession || existingSession.mode !== "plan") {
+    log.debug("issue_status_change.no_plan_session", {
+      trace_id: traceId,
+      issue_id: issueData.id,
+      issue_identifier: issueData.identifier,
+      has_session: Boolean(existingSession),
+      mode: existingSession?.mode,
+    });
+    return;
+  }
+
+  const orgId = webhook.organizationId;
+  const client = await getLinearClient(env, orgId);
+  if (!client) {
+    log.error("issue_status_change.no_oauth_token", {
+      trace_id: traceId,
+      org_id: orgId,
+      issue_id: issueData.id,
+    });
+    return;
+  }
+
+  log.info("issue_status_change.triggering_apply", {
+    trace_id: traceId,
+    issue_id: issueData.id,
+    issue_identifier: issueData.identifier,
+    plan_session_id: existingSession.sessionId,
+    new_state: issueData.state.name,
+  });
+
+  // Fetch plan output from the existing plan session
+  const headers = await getAuthHeaders(env, traceId);
+  let planContent = "";
+  try {
+    const eventsRes = await env.CONTROL_PLANE.fetch(
+      `https://internal/sessions/${existingSession.sessionId}/events?limit=100`,
+      { method: "GET", headers }
+    );
+    if (eventsRes.ok) {
+      const eventsData = (await eventsRes.json()) as {
+        events: Array<{ type: string; data: Record<string, unknown> }>;
+      };
+      // Collect all token events to reconstruct the plan output
+      const tokenContents = eventsData.events
+        .filter((e) => e.type === "token")
+        .map((e) => String(e.data.content ?? ""))
+        .filter(Boolean);
+      if (tokenContents.length > 0) {
+        planContent = tokenContents.join("");
+      }
+    }
+  } catch (e) {
+    log.warn("issue_status_change.plan_fetch_failed", {
+      trace_id: traceId,
+      plan_session_id: existingSession.sessionId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  // Stop the old plan session (best effort)
+  try {
+    await env.CONTROL_PLANE.fetch(`https://internal/sessions/${existingSession.sessionId}/stop`, {
+      method: "POST",
+      headers,
+    });
+  } catch {
+    /* best effort */
+  }
+
+  // Fetch full issue details for label-based model override
+  const issueDetails = await fetchIssueDetails(client, issueData.id);
+  const labels = issueDetails?.labels || issueData.labels || [];
+
+  // Resolve model settings
+  const integrationConfig = await getLinearConfig(
+    env,
+    `${existingSession.repoOwner}/${existingSession.repoName}`.toLowerCase()
+  );
+  const labelModel = extractModelFromLabels(labels);
+  const { model, reasoningEffort } = resolveSessionModelSettings({
+    envDefaultModel: env.DEFAULT_MODEL,
+    configModel: integrationConfig.model,
+    configReasoningEffort: integrationConfig.reasoningEffort,
+    allowUserPreferenceOverride: integrationConfig.allowUserPreferenceOverride,
+    allowLabelModelOverride: integrationConfig.allowLabelModelOverride,
+    labelModel,
+  });
+
+  // Create new apply-mode session
+  const repoOwner = existingSession.repoOwner;
+  const repoName = existingSession.repoName;
+  const repoFullName = `${repoOwner}/${repoName}`;
+
+  const sessionRes = await env.CONTROL_PLANE.fetch("https://internal/sessions", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      repoOwner,
+      repoName,
+      title: `${issueData.identifier}: ${issueData.title}`,
+      model,
+      reasoningEffort,
+      mode: "apply",
+      sandboxProvider: "ec2",
+    }),
+  });
+
+  if (!sessionRes.ok) {
+    let errBody = "";
+    try {
+      errBody = await sessionRes.text();
+    } catch {
+      /* ignore */
+    }
+    log.error("issue_status_change.create_session_failed", {
+      trace_id: traceId,
+      issue_identifier: issueData.identifier,
+      repo: repoFullName,
+      http_status: sessionRes.status,
+      response_body: errBody.slice(0, 500),
+    });
+    return;
+  }
+
+  const session = (await sessionRes.json()) as { sessionId: string };
+
+  // Store the new session mapping (replaces the plan session)
+  await storeIssueSession(env, issueData.id, {
+    sessionId: session.sessionId,
+    issueId: issueData.id,
+    issueIdentifier: issueData.identifier,
+    repoOwner,
+    repoName,
+    model,
+    agentSessionId: existingSession.agentSessionId,
+    mode: "apply",
+    createdAt: Date.now(),
+  });
+
+  // Build prompt with plan context
+  const promptParts: string[] = [
+    `Linear Issue: ${issueData.identifier} — ${issueData.title}`,
+    `URL: ${issueData.url}`,
+    "",
+  ];
+
+  if (issueData.description) {
+    promptParts.push(issueData.description);
+  } else {
+    promptParts.push("(No description provided)");
+  }
+
+  if (planContent) {
+    promptParts.push("", "---", "**Implementation plan from planning session:**", "", planContent);
+  }
+
+  promptParts.push(
+    "",
+    "IMPORTANT: You are in APPLY mode. A planning session has already analyzed this issue and produced the plan above. Create a new branch off the base branch, implement the changes according to the plan, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a separate pull request."
+  );
+
+  const callbackContext: CallbackContext = {
+    source: "linear",
+    issueId: issueData.id,
+    issueIdentifier: issueData.identifier,
+    issueUrl: issueData.url,
+    repoFullName,
+    model,
+    agentSessionId: existingSession.agentSessionId,
+    organizationId: orgId,
+    emitToolProgressActivities: integrationConfig.emitToolProgressActivities,
+  };
+
+  const promptRes = await env.CONTROL_PLANE.fetch(
+    `https://internal/sessions/${session.sessionId}/prompt`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        content: promptParts.join("\n"),
+        source: "linear",
+        callbackContext,
+      }),
+    }
+  );
+
+  if (!promptRes.ok) {
+    let errBody = "";
+    try {
+      errBody = await promptRes.text();
+    } catch {
+      /* ignore */
+    }
+    log.error("issue_status_change.send_prompt_failed", {
+      trace_id: traceId,
+      session_id: session.sessionId,
+      issue_identifier: issueData.identifier,
+      http_status: promptRes.status,
+      response_body: errBody.slice(0, 500),
+    });
+    return;
+  }
+
+  // Emit agent activity if we have a stored agentSessionId (best effort)
+  if (existingSession.agentSessionId) {
+    try {
+      await emitAgentActivity(client, existingSession.agentSessionId, {
+        type: "response",
+        body: `Ticket moved to **${issueData.state.name}** — starting apply session on \`${repoFullName}\` with **${model}**.\n\n[View session](${env.WEB_APP_URL}/session/${session.sessionId})`,
+      });
+    } catch {
+      /* best effort */
+    }
+  }
+
+  log.info("issue_status_change.apply_session_created", {
+    trace_id: traceId,
+    session_id: session.sessionId,
+    plan_session_id: existingSession.sessionId,
+    issue_identifier: issueData.identifier,
+    repo: repoFullName,
+    model,
+    has_plan_content: Boolean(planContent),
     duration_ms: Date.now() - startTime,
   });
 }

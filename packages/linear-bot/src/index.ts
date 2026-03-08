@@ -6,7 +6,7 @@
  */
 
 import { Hono } from "hono";
-import type { Env, UserPreferences, AgentSessionWebhook } from "./types";
+import type { Env, UserPreferences, AgentSessionWebhook, IssueUpdateWebhook } from "./types";
 import {
   buildOAuthAuthorizeUrl,
   exchangeCodeForToken,
@@ -15,7 +15,7 @@ import {
 import { callbacksRouter } from "./callbacks";
 import { createLogger } from "./logger";
 import { verifyInternalToken } from "@open-inspect/shared";
-import { handleAgentSessionEvent, escapeHtml } from "./webhook-handler";
+import { handleAgentSessionEvent, handleIssueStatusChange, escapeHtml } from "./webhook-handler";
 import {
   getTeamRepoMapping,
   getProjectRepoMapping,
@@ -65,6 +65,28 @@ function isAgentSessionWebhookPayload(payload: unknown): payload is AgentSession
   }
 
   return typeof agentSession.id === "string";
+}
+
+function isIssueUpdateWebhookPayload(payload: unknown): payload is IssueUpdateWebhook {
+  if (!isObjectRecord(payload)) return false;
+
+  const type = readStringField(payload, "type");
+  const action = readStringField(payload, "action");
+  const organizationId = readStringField(payload, "organizationId");
+
+  if (type !== "Issue" || action !== "update" || !organizationId) return false;
+
+  const data = payload.data;
+  if (!isObjectRecord(data)) return false;
+  if (typeof data.id !== "string" || typeof data.identifier !== "string") return false;
+
+  const state = data.state;
+  if (!isObjectRecord(state) || typeof state.name !== "string") return false;
+
+  const updatedFrom = payload.updatedFrom;
+  if (!isObjectRecord(updatedFrom)) return false;
+
+  return true;
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -186,6 +208,41 @@ app.post("/webhook", async (c) => {
       http_status: 200,
       type: eventType,
       action,
+      duration_ms: Date.now() - startTime,
+    });
+    return c.json({ ok: true });
+  }
+
+  // ─── Issue update → status change trigger ─────────────────────────────────
+  if (eventType === "Issue" && action === "update") {
+    if (!isIssueUpdateWebhookPayload(payload)) {
+      log.warn("webhook.invalid_payload", {
+        trace_id: traceId,
+        reason: "invalid_issue_update_shape",
+      });
+      return c.json({ error: "Invalid payload" }, 400);
+    }
+
+    // Deduplicate: issueId + stateId change
+    const issueId = payload.data.id;
+    const newStateId = payload.data.state.id;
+    const eventKey = `issue-status:${issueId}:${newStateId}`;
+    const isDuplicate = await isDuplicateEvent(c.env, eventKey);
+    if (isDuplicate) {
+      log.info("webhook.deduplicated", { trace_id: traceId, event_key: eventKey });
+      return c.json({ ok: true, skipped: true, reason: "duplicate" });
+    }
+
+    c.executionCtx.waitUntil(handleIssueStatusChange(payload, c.env, traceId));
+
+    log.info("http.request", {
+      trace_id: traceId,
+      http_path: "/webhook",
+      http_status: 200,
+      type: eventType,
+      action,
+      issue_id: issueId,
+      new_state: payload.data.state.name,
       duration_ms: Date.now() - startTime,
     });
     return c.json({ ok: true });
