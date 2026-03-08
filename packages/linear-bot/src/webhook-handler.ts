@@ -176,7 +176,7 @@ async function handleFollowUp(
 
   let promptContent: string;
   if (isPlanMode) {
-    promptContent = `Follow-up on ${issue.identifier} — the user has provided feedback on the plan. Please revise the plan based on their comments and provide an updated implementation plan.\n\n**User feedback:**\n${followUpContent}${sessionContext}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Revise your previous plan based on the feedback above. Provide the complete updated plan, not just the changes.`;
+    promptContent = `Follow-up on ${issue.identifier} — the user has provided feedback on the plan. Please revise the plan based on their comments and provide an updated implementation plan.\n\n**User feedback:**\n${followUpContent}${sessionContext}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Revise your previous plan based on the feedback above. Provide the complete updated plan, not just the changes. The plans should not be overengineered or unnecessarily complex.`;
   } else {
     promptContent = `Follow-up on ${issue.identifier}:\n\n${followUpContent}${sessionContext}`;
   }
@@ -505,9 +505,9 @@ async function handleNewSession(
     webhook.agentSession.promptContext || buildPrompt(issue, issueDetails, comment, mode);
   const prompt =
     mode === "plan" && webhook.agentSession.promptContext
-      ? `${basePrompt}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations.`
+      ? `${basePrompt}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations. The plans should not be overengineered or unnecessarily complex.`
       : mode === "apply" && webhook.agentSession.promptContext
-        ? `${basePrompt}\n\nIMPORTANT: You are in APPLY mode. Create a new branch, implement all changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI.`
+        ? `${basePrompt}\n\nIMPORTANT: You are in APPLY mode. Create a new branch, implement all changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the \`spawn-task\` tool to spawn any large or complex tasks that can be done independently of the main task to create a seperate pull request.`
         : basePrompt;
   const callbackContext: CallbackContext = {
     source: "linear",
@@ -705,12 +705,12 @@ function buildPrompt(
   if (mode === "plan") {
     parts.push(
       "",
-      "IMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations."
+      "IMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations. The plans should not be overengineered or unnecessarily complex."
     );
   } else {
     parts.push(
       "",
-      "IMPORTANT: You are in APPLY mode. Create a new branch off the base branch, implement the changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. You MUST open a pull request before finishing."
+      "IMPORTANT: You are in APPLY mode. Create a new branch off the base branch, implement the changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. You MUST open a pull request before finishing. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a seperate pull request."
     );
   }
 
