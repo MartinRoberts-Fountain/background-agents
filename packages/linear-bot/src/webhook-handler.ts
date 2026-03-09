@@ -41,6 +41,23 @@ import {
 
 const log = createLogger("handler");
 
+// ─── Shared Constants ────────────────────────────────────────────────────────
+
+const PLAN_MODE_INSTRUCTION =
+  "IMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations. The plans should not be overengineered or unnecessarily complex.";
+
+const APPLY_MODE_INSTRUCTION =
+  "IMPORTANT: You are in APPLY mode. Create a new branch off the base branch, implement the changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a separate pull request.";
+
+const SESSION_THREAD_MARKER = "This thread is for an agent session with fountaincodingagent.";
+
+/** Status names that trigger an automatic apply session from a plan. */
+const PLAN_TRIGGER_STATUSES = new Set(["todo", "to do"]);
+
+function getModeInstruction(mode: SessionMode): string {
+  return mode === "plan" ? PLAN_MODE_INSTRUCTION : APPLY_MODE_INSTRUCTION;
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -57,6 +74,78 @@ async function getAuthHeaders(env: Env, traceId?: string): Promise<Record<string
   }
   if (traceId) headers["x-trace-id"] = traceId;
   return headers;
+}
+
+// ─── Control Plane Helpers ────────────────────────────────────────────────────
+
+interface CreateSessionParams {
+  env: Env;
+  headers: Record<string, string>;
+  repoOwner: string;
+  repoName: string;
+  title: string;
+  model: string;
+  reasoningEffort: string | undefined;
+  mode: SessionMode;
+  sandboxProvider: "helm" | "ec2";
+}
+
+async function createControlPlaneSession(
+  params: CreateSessionParams
+): Promise<{ sessionId: string } | null> {
+  const res = await params.env.CONTROL_PLANE.fetch("https://internal/sessions", {
+    method: "POST",
+    headers: params.headers,
+    body: JSON.stringify({
+      repoOwner: params.repoOwner,
+      repoName: params.repoName,
+      title: params.title,
+      model: params.model,
+      reasoningEffort: params.reasoningEffort,
+      mode: params.mode,
+      sandboxProvider: params.sandboxProvider,
+    }),
+  });
+
+  if (!res.ok) {
+    return null;
+  }
+  return (await res.json()) as { sessionId: string };
+}
+
+interface SendPromptParams {
+  env: Env;
+  headers: Record<string, string>;
+  sessionId: string;
+  content: string;
+  callbackContext: CallbackContext;
+  authorId?: string;
+}
+
+async function sendSessionPrompt(params: SendPromptParams): Promise<boolean> {
+  const body: Record<string, unknown> = {
+    content: params.content,
+    source: "linear",
+    callbackContext: params.callbackContext,
+  };
+  if (params.authorId) body.authorId = params.authorId;
+
+  const res = await params.env.CONTROL_PLANE.fetch(
+    `https://internal/sessions/${params.sessionId}/prompt`,
+    { method: "POST", headers: params.headers, body: JSON.stringify(body) }
+  );
+  return res.ok;
+}
+
+function isSessionThreadMarkerComment(body: string): boolean {
+  const normalized = body.trim();
+  return (
+    normalized === SESSION_THREAD_MARKER ||
+    normalized === `**Unknown:** ${SESSION_THREAD_MARKER}` ||
+    normalized === `**Agent instruction:** ${SESSION_THREAD_MARKER}` ||
+    normalized ===
+      `**Unknown:** ${SESSION_THREAD_MARKER}\n\n---\n**Agent instruction:** ${SESSION_THREAD_MARKER}`
+  );
 }
 
 // ─── Sub-handlers ────────────────────────────────────────────────────────────
@@ -177,7 +266,7 @@ async function handleFollowUp(
 
   let promptContent: string;
   if (isPlanMode) {
-    promptContent = `Follow-up on ${issue.identifier} — the user has provided feedback on the plan. Please revise the plan based on their comments and provide an updated implementation plan.\n\n**User feedback:**\n${followUpContent}${sessionContext}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Revise your previous plan based on the feedback above. Provide the complete updated plan, not just the changes. The plans should not be overengineered or unnecessarily complex.`;
+    promptContent = `Follow-up on ${issue.identifier} — the user has provided feedback on the plan. Please revise the plan based on their comments and provide an updated implementation plan.\n\n**User feedback:**\n${followUpContent}${sessionContext}\n\n${PLAN_MODE_INSTRUCTION} Revise your previous plan based on the feedback above. Provide the complete updated plan, not just the changes.`;
   } else {
     promptContent = `Follow-up on ${issue.identifier}:\n\n${followUpContent}${sessionContext}`;
   }
@@ -441,43 +530,31 @@ async function handleNewSession(
 
   const headers = await getAuthHeaders(env, traceId);
 
-  const sessionRes = await env.CONTROL_PLANE.fetch("https://internal/sessions", {
-    method: "POST",
+  const session = await createControlPlaneSession({
+    env,
     headers,
-    body: JSON.stringify({
-      repoOwner,
-      repoName,
-      title: `${issue.identifier}: ${issue.title}`,
-      model,
-      reasoningEffort,
-      mode,
-      sandboxProvider,
-    }),
+    repoOwner: repoOwner!,
+    repoName: repoName!,
+    title: `${issue.identifier}: ${issue.title}`,
+    model,
+    reasoningEffort,
+    mode,
+    sandboxProvider,
   });
 
-  if (!sessionRes.ok) {
-    let sessionErrBody = "";
-    try {
-      sessionErrBody = await sessionRes.text();
-    } catch {
-      /* ignore */
-    }
+  if (!session) {
     await emitAgentActivity(client, agentSessionId, {
       type: "error",
-      body: `Failed to create a coding session.\n\n\`HTTP ${sessionRes.status}: ${sessionErrBody.slice(0, 200)}\``,
+      body: "Failed to create a coding session.",
     });
     log.error("control_plane.create_session", {
       trace_id: traceId,
       issue_identifier: issue.identifier,
       repo: repoFullName,
-      http_status: sessionRes.status,
-      response_body: sessionErrBody.slice(0, 500),
       duration_ms: Date.now() - startTime,
     });
     return;
   }
-
-  const session = (await sessionRes.json()) as { sessionId: string };
 
   await storeIssueSession(env, issue.id, {
     sessionId: session.sessionId,
@@ -501,15 +578,13 @@ async function handleNewSession(
 
   // ─── Build and send prompt ────────────────────────────────────────────
 
-  // Prefer Linear's promptContext (includes issue, comments, guidance)
+  // Prefer Linear's promptContext; append mode instruction when using it
   const basePrompt =
     webhook.agentSession.promptContext || buildPrompt(issue, issueDetails, comment, mode);
-  const prompt =
-    mode === "plan" && webhook.agentSession.promptContext
-      ? `${basePrompt}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations. The plans should not be overengineered or unnecessarily complex.`
-      : mode === "apply" && webhook.agentSession.promptContext
-        ? `${basePrompt}\n\nIMPORTANT: You are in APPLY mode. Create a new branch, implement all changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the \`spawn-task\` tool to spawn any large or complex tasks that can be done independently of the main task to create a seperate pull request.`
-        : basePrompt;
+  const prompt = webhook.agentSession.promptContext
+    ? `${basePrompt}\n\n${getModeInstruction(mode)}`
+    : basePrompt;
+
   const callbackContext: CallbackContext = {
     source: "linear",
     issueId: issue.id,
@@ -522,37 +597,24 @@ async function handleNewSession(
     emitToolProgressActivities: integrationConfig.emitToolProgressActivities,
   };
 
-  const promptRes = await env.CONTROL_PLANE.fetch(
-    `https://internal/sessions/${session.sessionId}/prompt`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        content: prompt,
-        authorId: `linear:${webhook.appUserId}`,
-        source: "linear",
-        callbackContext,
-      }),
-    }
-  );
+  const promptOk = await sendSessionPrompt({
+    env,
+    headers,
+    sessionId: session.sessionId,
+    content: prompt,
+    callbackContext,
+    authorId: `linear:${webhook.appUserId}`,
+  });
 
-  if (!promptRes.ok) {
-    let promptErrBody = "";
-    try {
-      promptErrBody = await promptRes.text();
-    } catch {
-      /* ignore */
-    }
+  if (!promptOk) {
     await emitAgentActivity(client, agentSessionId, {
       type: "error",
-      body: `Failed to send the prompt to the coding session.\n\n\`HTTP ${promptRes.status}: ${promptErrBody.slice(0, 200)}\``,
+      body: "Failed to send the prompt to the coding session.",
     });
     log.error("control_plane.send_prompt", {
       trace_id: traceId,
       session_id: session.sessionId,
       issue_identifier: issue.identifier,
-      http_status: promptRes.status,
-      response_body: promptErrBody.slice(0, 500),
       duration_ms: Date.now() - startTime,
     });
     return;
@@ -577,8 +639,6 @@ async function handleNewSession(
 }
 
 // ─── Issue Status Change → Apply Trigger ─────────────────────────────────────
-
-const PLAN_TRIGGER_STATUSES = new Set(["todo", "to do"]);
 
 export async function handleIssueStatusChange(
   webhook: IssueUpdateWebhook,
@@ -676,38 +736,26 @@ export async function handleIssueStatusChange(
   const repoName = existingSession.repoName;
   const repoFullName = `${repoOwner}/${repoName}`;
 
-  const sessionRes = await env.CONTROL_PLANE.fetch("https://internal/sessions", {
-    method: "POST",
+  const session = await createControlPlaneSession({
+    env,
     headers,
-    body: JSON.stringify({
-      repoOwner,
-      repoName,
-      title: `${issueData.identifier}: ${issueData.title}`,
-      model,
-      reasoningEffort,
-      mode: "apply",
-      sandboxProvider: "ec2",
-    }),
+    repoOwner,
+    repoName,
+    title: `${issueData.identifier}: ${issueData.title}`,
+    model,
+    reasoningEffort,
+    mode: "apply",
+    sandboxProvider: "ec2",
   });
 
-  if (!sessionRes.ok) {
-    let errBody = "";
-    try {
-      errBody = await sessionRes.text();
-    } catch {
-      /* ignore */
-    }
+  if (!session) {
     log.error("issue_status_change.create_session_failed", {
       trace_id: traceId,
       issue_identifier: issueData.identifier,
       repo: repoFullName,
-      http_status: sessionRes.status,
-      response_body: errBody.slice(0, 500),
     });
     return;
   }
-
-  const session = (await sessionRes.json()) as { sessionId: string };
 
   // Store the new session mapping (replaces the plan session)
   await storeIssueSession(env, issueData.id, {
@@ -722,24 +770,16 @@ export async function handleIssueStatusChange(
     createdAt: Date.now(),
   });
 
-  // Build prompt — plan output is already on the Linear ticket and will be
-  // included in promptContext for new agent sessions automatically.
+  // Build prompt — plan output is on the Linear ticket and is included
+  // in promptContext for new agent sessions automatically.
   const promptParts: string[] = [
     `Linear Issue: ${issueData.identifier} — ${issueData.title}`,
     `URL: ${issueData.url}`,
     "",
-  ];
-
-  if (issueData.description) {
-    promptParts.push(issueData.description);
-  } else {
-    promptParts.push("(No description provided)");
-  }
-
-  promptParts.push(
+    issueData.description || "(No description provided)",
     "",
-    "IMPORTANT: You are in APPLY mode. A planning session has already analyzed this issue and produced a plan. Create a new branch off the base branch, implement the changes according to the plan, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a separate pull request."
-  );
+    getModeInstruction("apply"),
+  ];
 
   const callbackContext: CallbackContext = {
     source: "linear",
@@ -753,32 +793,19 @@ export async function handleIssueStatusChange(
     emitToolProgressActivities: integrationConfig.emitToolProgressActivities,
   };
 
-  const promptRes = await env.CONTROL_PLANE.fetch(
-    `https://internal/sessions/${session.sessionId}/prompt`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        content: promptParts.join("\n"),
-        source: "linear",
-        callbackContext,
-      }),
-    }
-  );
+  const promptOk = await sendSessionPrompt({
+    env,
+    headers,
+    sessionId: session.sessionId,
+    content: promptParts.join("\n"),
+    callbackContext,
+  });
 
-  if (!promptRes.ok) {
-    let errBody = "";
-    try {
-      errBody = await promptRes.text();
-    } catch {
-      /* ignore */
-    }
+  if (!promptOk) {
     log.error("issue_status_change.send_prompt_failed", {
       trace_id: traceId,
       session_id: session.sessionId,
       issue_identifier: issueData.identifier,
-      http_status: promptRes.status,
-      response_body: errBody.slice(0, 500),
     });
     return;
   }
@@ -875,32 +902,13 @@ function buildPrompt(
   comment?: { body: string } | null,
   mode: SessionMode = "apply"
 ): string {
-  const SESSION_THREAD_MARKER = "This thread is for an agent session with fountaincodingagent.";
-
-  const isSessionThreadMarkerComment = (body: string): boolean => {
-    const normalized = body.trim();
-    return (
-      normalized === SESSION_THREAD_MARKER ||
-      normalized === `**Unknown:** ${SESSION_THREAD_MARKER}` ||
-      normalized === `**Agent instruction:** ${SESSION_THREAD_MARKER}` ||
-      normalized ===
-        `**Unknown:** ${SESSION_THREAD_MARKER}\n\n---\n**Agent instruction:** ${SESSION_THREAD_MARKER}`
-    );
-  };
-
   const parts: string[] = [
     `Linear Issue: ${issue.identifier} — ${issue.title}`,
     `URL: ${issue.url}`,
     "",
+    issue.description || "(No description provided)",
   ];
 
-  if (issue.description) {
-    parts.push(issue.description);
-  } else {
-    parts.push("(No description provided)");
-  }
-
-  // Add context from full issue details
   if (issueDetails) {
     if (issueDetails.labels.length > 0) {
       parts.push("", `**Labels:** ${issueDetails.labels.map((l) => l.name).join(", ")}`);
@@ -915,7 +923,6 @@ function buildPrompt(
       parts.push(`**Priority:** ${issueDetails.priorityLabel}`);
     }
 
-    // Include recent comments for context
     const recentComments = issueDetails.comments
       .filter((c) => !isSessionThreadMarkerComment(c.body))
       .slice(-5);
@@ -933,17 +940,7 @@ function buildPrompt(
     parts.push("", "---", `**Agent instruction:** ${comment.body}`);
   }
 
-  if (mode === "plan") {
-    parts.push(
-      "",
-      "IMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations. The plans should not be overengineered or unnecessarily complex."
-    );
-  } else {
-    parts.push(
-      "",
-      "IMPORTANT: You are in APPLY mode. Create a new branch off the base branch, implement the changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. You MUST open a pull request before finishing. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a seperate pull request."
-    );
-  }
+  parts.push("", getModeInstruction(mode));
 
   return parts.join("\n");
 }

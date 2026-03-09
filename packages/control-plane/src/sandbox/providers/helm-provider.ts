@@ -87,7 +87,22 @@ export interface HelmDeleteResponse {
  * receives authenticated requests and runs `helm install/uninstall`.
  */
 export class HelmApiClient {
-  private readonly config: HelmApiConfig;
+  private readonly _config: HelmApiConfig;
+
+  /** Kubernetes namespace for sandbox pods. */
+  get namespace(): string {
+    return this._config.namespace;
+  }
+
+  /** Cloudflare tunnel token for sandbox connectivity. */
+  get tunnelToken(): string {
+    return this._config.tunnelToken;
+  }
+
+  /** Source control provider (defaults to "github"). */
+  get scmProvider(): "github" | "bitbucket" {
+    return this._config.scmProvider ?? "github";
+  }
 
   constructor(config: HelmApiConfig) {
     if (!config.apiUrl) {
@@ -97,7 +112,7 @@ export class HelmApiClient {
       throw new Error("HelmApiClient requires apiSecret");
     }
 
-    this.config = {
+    this._config = {
       ...config,
       apiUrl: HelmApiClient.normalizeApiUrl(config.apiUrl),
     };
@@ -121,7 +136,7 @@ export class HelmApiClient {
   }
 
   private async getHeaders(): Promise<Record<string, string>> {
-    const token = await generateInternalToken(this.config.apiSecret);
+    const token = await generateInternalToken(this._config.apiSecret);
     return {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
@@ -130,7 +145,7 @@ export class HelmApiClient {
 
   async deploy(request: HelmDeployRequest): Promise<HelmDeployResponse> {
     const headers = await this.getHeaders();
-    const response = await fetch(`${this.config.apiUrl}/deploy`, {
+    const response = await fetch(`${this._config.apiUrl}/deploy`, {
       method: "POST",
       headers,
       body: JSON.stringify(request),
@@ -146,7 +161,7 @@ export class HelmApiClient {
 
   async delete(request: HelmDeleteRequest): Promise<HelmDeleteResponse> {
     const headers = await this.getHeaders();
-    const response = await fetch(`${this.config.apiUrl}/delete`, {
+    const response = await fetch(`${this._config.apiUrl}/delete`, {
       method: "POST",
       headers,
       body: JSON.stringify(request),
@@ -161,7 +176,7 @@ export class HelmApiClient {
   }
 
   async health(): Promise<{ status: string; service: string }> {
-    const response = await fetch(`${this.config.apiUrl}/health`);
+    const response = await fetch(`${this._config.apiUrl}/health`);
     if (!response.ok) {
       throw new Error(`Helm API health check failed: ${response.status}`);
     }
@@ -219,9 +234,9 @@ export class HelmSandboxProvider implements SandboxProvider {
         agent: config.agent,
         userEnvVars: config.userEnvVars,
         timeoutSeconds: config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
-        tunnelToken: this.client["config"].tunnelToken,
-        namespace: this.client["config"].namespace,
-        scmProvider: this.client["config"].scmProvider ?? "github",
+        tunnelToken: this.client.tunnelToken,
+        namespace: this.client.namespace,
+        scmProvider: this.client.scmProvider,
         anthropicApiKey: config.userEnvVars?.["ANTHROPIC_API_KEY"],
         gitCloneToken:
           config.userEnvVars?.["VCS_CLONE_TOKEN"] ??
