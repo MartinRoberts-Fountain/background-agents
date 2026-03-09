@@ -3,8 +3,10 @@
  *
  * Handles:
  * - Build callbacks from Modal async builder (build-complete, build-failed)
+ * - EC2 image builds (spin up AMI, run setup script, create new AMI)
  * - Manual build triggers
  * - Image build status queries
+ * - Setup script CRUD
  * - Maintenance operations (stale builds, cleanup)
  */
 
@@ -14,6 +16,7 @@ import { GlobalSecretsStore } from "../db/global-secrets";
 import { RepoSecretsStore } from "../db/repo-secrets";
 import { mergeSecrets } from "../db/secrets-validation";
 import { createModalClient } from "../sandbox/client";
+import { EC2ApiClient } from "../sandbox/providers/ec2-provider";
 import { createLogger } from "../logger";
 import type { Env } from "../types";
 import {
@@ -504,6 +507,283 @@ async function handleGetEnabledRepos(
   }
 }
 
+/**
+ * GET /repo-images/setup-script/:owner/:name
+ * Get the setup script for a repo.
+ */
+async function handleGetSetupScript(
+  _request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  _ctx: RequestContext
+): Promise<Response> {
+  if (!env.DB) {
+    return error("Database not configured", 503);
+  }
+
+  const owner = match.groups?.owner;
+  const name = match.groups?.name;
+  if (!owner || !name) {
+    return error("Owner and name are required", 400);
+  }
+
+  const metadataStore = new RepoMetadataStore(env.DB);
+  const script = await metadataStore.getSetupScript(owner, name);
+  return json({ setupScript: script });
+}
+
+/**
+ * PUT /repo-images/setup-script/:owner/:name
+ * Set the setup script for a repo.
+ */
+async function handleSetSetupScript(
+  request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  if (!env.DB) {
+    return error("Database not configured", 503);
+  }
+
+  const owner = match.groups?.owner;
+  const name = match.groups?.name;
+  if (!owner || !name) {
+    return error("Owner and name are required", 400);
+  }
+
+  let body: { setupScript?: unknown };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return error("Invalid JSON body", 400);
+  }
+
+  if (body.setupScript !== null && typeof body.setupScript !== "string") {
+    return error("setupScript must be a string or null", 400);
+  }
+
+  const script = (body.setupScript as string | null) ?? null;
+
+  const metadataStore = new RepoMetadataStore(env.DB);
+
+  try {
+    await metadataStore.setSetupScript(owner, name, script);
+
+    logger.info("repo_image.setup_script_updated", {
+      repo_owner: owner,
+      repo_name: name,
+      has_script: script !== null && script.length > 0,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+
+    return json({ ok: true });
+  } catch (e) {
+    logger.error("repo_image.setup_script_error", {
+      error: e instanceof Error ? e.message : String(e),
+      repo_owner: owner,
+      repo_name: name,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return error("Failed to update setup script", 500);
+  }
+}
+
+/**
+ * POST /repo-images/ec2/trigger/:owner/:name
+ * Trigger an EC2 image build: spin up current AMI, run setup script, create new AMI.
+ */
+async function handleTriggerEC2Build(
+  _request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  if (!env.DB) {
+    return error("Database not configured", 503);
+  }
+  if (!env.EC2_API_URL || !env.EC2_API_SECRET) {
+    return error("EC2 configuration not available", 503);
+  }
+  if (!env.WORKER_URL) {
+    return error("WORKER_URL not configured", 503);
+  }
+
+  const owner = match.groups?.owner;
+  const name = match.groups?.name;
+  if (!owner || !name) {
+    return error("Owner and name are required", 400);
+  }
+
+  // Fetch setup script
+  const metadataStore = new RepoMetadataStore(env.DB);
+  const setupScript = await metadataStore.getSetupScript(owner, name);
+  if (!setupScript) {
+    return error("No setup script configured for this repository", 400);
+  }
+
+  const store = new RepoImageStore(env.DB);
+  const now = Date.now();
+  const buildId = `ec2-img-${owner}-${name}-${now}`;
+
+  try {
+    // Register the build in D1
+    await store.registerBuild({
+      id: buildId,
+      repoOwner: owner,
+      repoName: name,
+      baseBranch: "main",
+    });
+
+    // Construct callback URL
+    const callbackUrl = `${env.WORKER_URL}/repo-images/ec2/build-complete`;
+
+    // Trigger build on EC2 deployer
+    const ec2Client = new EC2ApiClient({
+      apiUrl: env.EC2_API_URL,
+      apiSecret: env.EC2_API_SECRET,
+    });
+
+    await ec2Client.buildImage({
+      buildId,
+      setupScript,
+      callbackUrl,
+    });
+
+    logger.info("repo_image.ec2_build_triggered", {
+      build_id: buildId,
+      repo_owner: owner,
+      repo_name: name,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+
+    return json({ buildId, status: "building" });
+  } catch (e) {
+    logger.error("repo_image.ec2_trigger_error", {
+      error: e instanceof Error ? e.message : String(e),
+      repo_owner: owner,
+      repo_name: name,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return error("Failed to trigger EC2 image build", 500);
+  }
+}
+
+/**
+ * POST /repo-images/ec2/build-complete
+ * Callback from EC2 image builder on success. The provider_image_id is the new AMI ID.
+ */
+async function handleEC2BuildComplete(
+  request: Request,
+  env: Env,
+  _match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  if (!env.DB) {
+    return error("Database not configured", 503);
+  }
+
+  let body: {
+    build_id?: string;
+    provider_image_id?: string;
+    build_duration_seconds?: number;
+  };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return error("Invalid JSON body", 400);
+  }
+
+  const buildId = body.build_id;
+  const providerImageId = body.provider_image_id;
+  const buildDurationSeconds = body.build_duration_seconds;
+
+  if (!buildId || !providerImageId) {
+    return error("build_id and provider_image_id are required", 400);
+  }
+
+  const store = new RepoImageStore(env.DB);
+
+  try {
+    const result = await store.markReady(buildId, providerImageId, "", buildDurationSeconds ?? 0);
+
+    logger.info("repo_image.ec2_build_complete", {
+      build_id: buildId,
+      provider_image_id: providerImageId,
+      replaced_image_id: result.replacedImageId,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+
+    // Note: old AMIs are not automatically deregistered here.
+    // AWS AMIs should be cleaned up separately.
+
+    return json({ ok: true, replacedImageId: result.replacedImageId });
+  } catch (e) {
+    logger.error("repo_image.ec2_build_complete_error", {
+      error: e instanceof Error ? e.message : String(e),
+      build_id: buildId,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return error("Failed to mark EC2 build as ready", 500);
+  }
+}
+
+/**
+ * POST /repo-images/ec2/build-failed
+ * Callback from EC2 image builder on failure.
+ */
+async function handleEC2BuildFailed(
+  request: Request,
+  env: Env,
+  _match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  if (!env.DB) {
+    return error("Database not configured", 503);
+  }
+
+  let body: { build_id?: string; error?: string };
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return error("Invalid JSON body", 400);
+  }
+
+  const buildId = body.build_id;
+  if (!buildId) {
+    return error("build_id is required", 400);
+  }
+
+  const store = new RepoImageStore(env.DB);
+
+  try {
+    await store.markFailed(buildId, body.error || "Unknown error");
+
+    logger.info("repo_image.ec2_build_failed", {
+      build_id: buildId,
+      error_message: body.error,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+
+    return json({ ok: true });
+  } catch (e) {
+    logger.error("repo_image.ec2_build_failed_error", {
+      error: e instanceof Error ? e.message : String(e),
+      build_id: buildId,
+      request_id: ctx.request_id,
+      trace_id: ctx.trace_id,
+    });
+    return error("Failed to mark EC2 build as failed", 500);
+  }
+}
+
 export const repoImageRoutes: Route[] = [
   {
     method: "POST",
@@ -544,5 +824,32 @@ export const repoImageRoutes: Route[] = [
     method: "POST",
     pattern: parsePattern("/repo-images/cleanup"),
     handler: handleCleanup,
+  },
+  // Setup script CRUD
+  {
+    method: "GET",
+    pattern: parsePattern("/repo-images/setup-script/:owner/:name"),
+    handler: handleGetSetupScript,
+  },
+  {
+    method: "PUT",
+    pattern: parsePattern("/repo-images/setup-script/:owner/:name"),
+    handler: handleSetSetupScript,
+  },
+  // EC2 image builds
+  {
+    method: "POST",
+    pattern: parsePattern("/repo-images/ec2/trigger/:owner/:name"),
+    handler: handleTriggerEC2Build,
+  },
+  {
+    method: "POST",
+    pattern: parsePattern("/repo-images/ec2/build-complete"),
+    handler: handleEC2BuildComplete,
+  },
+  {
+    method: "POST",
+    pattern: parsePattern("/repo-images/ec2/build-failed"),
+    handler: handleEC2BuildFailed,
   },
 ];

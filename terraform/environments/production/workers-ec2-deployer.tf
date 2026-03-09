@@ -35,13 +35,16 @@ module "ec2_deployer_worker" {
   ]
 
   durable_objects = [
-    { binding_name = "EC2_INSTANCE", class_name = "EC2InstanceDO" }
+    { binding_name = "EC2_INSTANCE", class_name = "EC2InstanceDO" },
+    { binding_name = "EC2_IMAGE_BUILD", class_name = "EC2ImageBuildDO" }
   ]
 
   enable_durable_object_bindings = var.enable_durable_object_bindings
   compatibility_date             = "2024-09-23"
   compatibility_flags            = ["nodejs_compat"]
-  migration_tag                  = "v1"
+  migration_tag                  = "v2"
+  migration_old_tag              = "v1"
+  new_sqlite_classes             = ["EC2ImageBuildDO"]
 
   depends_on = [null_resource.ec2_deployer_build]
 }

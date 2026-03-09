@@ -11,6 +11,7 @@ interface RepoMetadataRow {
   channel_associations: string | null;
   keywords: string | null;
   image_build_enabled: number;
+  setup_script: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -39,6 +40,7 @@ function toMetadata(row: RepoMetadataRow): RepoMetadata {
   if (channelAssociations) metadata.channelAssociations = channelAssociations;
   const keywords = parseJsonArray(row.keywords);
   if (keywords) metadata.keywords = keywords;
+  if (row.setup_script != null) metadata.setupScript = row.setup_script;
   return metadata;
 }
 
@@ -123,6 +125,32 @@ export class RepoMetadataStore {
       repoOwner: row.repo_owner,
       repoName: row.repo_name,
     }));
+  }
+
+  async getSetupScript(owner: string, name: string): Promise<string | null> {
+    const row = await this.db
+      .prepare("SELECT setup_script FROM repo_metadata WHERE repo_owner = ? AND repo_name = ?")
+      .bind(owner.toLowerCase(), name.toLowerCase())
+      .first<{ setup_script: string | null }>();
+
+    return row?.setup_script ?? null;
+  }
+
+  async setSetupScript(owner: string, name: string, script: string | null): Promise<void> {
+    const now = Date.now();
+    const normalizedOwner = owner.toLowerCase();
+    const normalizedName = name.toLowerCase();
+
+    await this.db
+      .prepare(
+        `INSERT INTO repo_metadata (repo_owner, repo_name, setup_script, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(repo_owner, repo_name) DO UPDATE SET
+           setup_script = excluded.setup_script,
+           updated_at = excluded.updated_at`
+      )
+      .bind(normalizedOwner, normalizedName, script, now, now)
+      .run();
   }
 
   async setImageBuildEnabled(owner: string, name: string, enabled: boolean): Promise<void> {

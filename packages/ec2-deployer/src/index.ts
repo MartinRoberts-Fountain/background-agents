@@ -18,10 +18,18 @@ interface DeployBody {
   repoName: string;
   userEnvVars?: Record<string, string>;
   model: string;
+  /** Optional repo-specific AMI ID. Uses base EC2_AMI_ID if not provided. */
+  amiId?: string;
 }
 
 interface ProviderObjectBody {
   providerObjectId: string;
+}
+
+interface BuildImageBody {
+  buildId: string;
+  setupScript: string;
+  callbackUrl: string;
 }
 
 interface CloudflareApiResponse<T> {
@@ -53,10 +61,14 @@ interface CloudflareListTunnelsResponse {
 
 interface AwsXmlResult {
   instancesSet?: { item: { instanceId: string } };
+  instanceState?: { name: string };
+  imageId?: string;
+  imageState?: string;
 }
 
 export interface Env {
   EC2_INSTANCE: DurableObjectNamespace;
+  EC2_IMAGE_BUILD: DurableObjectNamespace;
   EC2_API_SECRET: string;
   AWS_ACCESS_KEY_ID: string;
   AWS_SECRET_ACCESS_KEY: string;
@@ -130,9 +142,12 @@ async function cleanupOldResources(env: Env): Promise<void> {
  * Worker entry point.
  */
 export default {
-  // Reference so bundler does not tree-shake EC2InstanceDO (Cloudflare needs the named export)
+  // Reference so bundler does not tree-shake DOs (Cloudflare needs the named export)
   get EC2InstanceDO() {
     return EC2InstanceDO;
+  },
+  get EC2ImageBuildDO() {
+    return EC2ImageBuildDO;
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -159,6 +174,13 @@ export default {
       const body = (await request.clone().json()) as DeployBody;
       const id = env.EC2_INSTANCE.idFromName(body.sandboxId);
       const stub = env.EC2_INSTANCE.get(id);
+      return stub.fetch(request);
+    }
+
+    if (url.pathname === "/build-image" && request.method === "POST") {
+      const body = (await request.clone().json()) as BuildImageBody;
+      const id = env.EC2_IMAGE_BUILD.idFromName(body.buildId);
+      const stub = env.EC2_IMAGE_BUILD.get(id);
       return stub.fetch(request);
     }
 
@@ -388,8 +410,9 @@ EOF
 systemctl restart sandbox-supervisor
 `);
 
+    const imageId = config.amiId || this.env.EC2_AMI_ID;
     const result = await this.awsRequest("RunInstances", {
-      ImageId: this.env.EC2_AMI_ID,
+      ImageId: imageId,
       InstanceType: "t4g.2xlarge",
       MinCount: "1",
       MaxCount: "1",
@@ -526,11 +549,351 @@ systemctl restart sandbox-supervisor
   }
 
   private parseXml(xml: string): AwsXmlResult {
-    const res: AwsXmlResult = {};
-    const matchInstanceId = xml.match(/<instanceId>(.*?)<\/instanceId>/);
-    if (matchInstanceId) {
-      res.instancesSet = { item: { instanceId: matchInstanceId[1] } };
+    return parseAwsXml(xml);
+  }
+}
+
+function parseAwsXml(xml: string): AwsXmlResult {
+  const res: AwsXmlResult = {};
+  const matchInstanceId = xml.match(/<instanceId>(.*?)<\/instanceId>/);
+  if (matchInstanceId) {
+    res.instancesSet = { item: { instanceId: matchInstanceId[1] } };
+  }
+  const matchState = xml.match(/<instanceState>\s*<code>\d+<\/code>\s*<name>(.*?)<\/name>/);
+  if (matchState) {
+    res.instanceState = { name: matchState[1] };
+  }
+  const matchImageId = xml.match(/<imageId>(ami-[a-f0-9]+)<\/imageId>/);
+  if (matchImageId) {
+    res.imageId = matchImageId[1];
+  }
+  const matchImageState = xml.match(/<imageState>(.*?)<\/imageState>/);
+  if (matchImageState) {
+    res.imageState = matchImageState[1];
+  }
+  return res;
+}
+
+/** Maximum time to wait for setup script to complete (instance to stop). */
+const IMAGE_BUILD_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+/** Maximum time to wait for AMI creation to complete. */
+const AMI_CREATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * EC2 Image Build Durable Object
+ *
+ * Manages the lifecycle of an EC2 image build:
+ * 1. Launch base AMI with setup script as UserData (script shuts down on completion)
+ * 2. Poll for instance state = "stopped"
+ * 3. Create AMI from the stopped instance
+ * 4. Poll for AMI state = "available"
+ * 5. Terminate instance
+ * 6. Callback to control plane with new AMI ID
+ */
+export class EC2ImageBuildDO extends DurableObject<Env> {
+  private instanceId: string | null = null;
+  private buildId: string | null = null;
+  private callbackUrl: string | null = null;
+  private status: string = "pending";
+  private aws: AwsClient;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.aws = new AwsClient({
+      accessKeyId: env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+      region: env.AWS_REGION,
+      service: "ec2",
+    });
+    this.ctx.blockConcurrencyWhile(async () => {
+      this.instanceId = (await this.ctx.storage.get<string>("instanceId")) || null;
+      this.buildId = (await this.ctx.storage.get<string>("buildId")) || null;
+      this.callbackUrl = (await this.ctx.storage.get<string>("callbackUrl")) || null;
+      this.status = (await this.ctx.storage.get<string>("status")) || "pending";
+    });
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/build-image") {
+      return this.handleBuildImage(request);
     }
-    return res;
+
+    return new Response("Not Found", { status: 404 });
+  }
+
+  private async handleBuildImage(request: Request): Promise<Response> {
+    if (this.status !== "pending") {
+      return Response.json({
+        success: true,
+        buildId: this.buildId,
+        status: this.status,
+      });
+    }
+
+    const body = (await request.json()) as BuildImageBody;
+    this.buildId = body.buildId;
+    this.callbackUrl = body.callbackUrl;
+    await this.ctx.storage.put("buildId", this.buildId);
+    await this.ctx.storage.put("callbackUrl", this.callbackUrl);
+
+    const startedAt = Date.now();
+    this.status = "launching";
+    await this.ctx.storage.put("status", this.status);
+
+    try {
+      // 1. Launch EC2 with setup script that shuts down on completion
+      const userData = btoa(`#!/bin/bash
+set -e
+
+# Run the user-provided setup script
+cat > /tmp/open-inspect-setup.sh <<'SETUP_SCRIPT_EOF'
+${body.setupScript}
+SETUP_SCRIPT_EOF
+
+chmod +x /tmp/open-inspect-setup.sh
+bash /tmp/open-inspect-setup.sh 2>&1 | tee /var/log/open-inspect-setup.log
+
+# Signal completion by shutting down
+shutdown -h now
+`);
+
+      const launchResult = await this.awsRequest("RunInstances", {
+        ImageId: this.env.EC2_AMI_ID,
+        InstanceType: "t4g.2xlarge",
+        MinCount: "1",
+        MaxCount: "1",
+        KeyName: "development-am",
+        "SecurityGroupId.1": "sg-064453e70f4d22ea9",
+        UserData: userData,
+        // Use on-demand for image builds (more reliable than spot)
+        TagSpecification: [
+          {
+            ResourceType: "instance",
+            Tag: [
+              { Key: "Name", Value: `open-inspect-image-build-${body.buildId}` },
+              { Key: "OpenInspectBuildId", Value: body.buildId },
+            ],
+          },
+        ],
+      });
+
+      this.instanceId = launchResult?.instancesSet?.item?.instanceId ?? null;
+      if (!this.instanceId) {
+        throw new Error(`Failed to launch EC2 instance: ${JSON.stringify(launchResult)}`);
+      }
+      await this.ctx.storage.put("instanceId", this.instanceId);
+
+      this.status = "running_setup";
+      await this.ctx.storage.put("status", this.status);
+
+      console.log(`Image build ${body.buildId}: launched instance ${this.instanceId}`);
+
+      // 2. Wait for instance to stop (setup script calls shutdown -h)
+      await this.waitForInstanceState(this.instanceId, "stopped", IMAGE_BUILD_TIMEOUT_MS);
+
+      this.status = "creating_ami";
+      await this.ctx.storage.put("status", this.status);
+
+      console.log(`Image build ${body.buildId}: instance stopped, creating AMI`);
+
+      // 3. Create AMI from the stopped instance
+      const amiName = `open-inspect-${body.buildId}`;
+      const createImageResult = await this.awsRequest("CreateImage", {
+        InstanceId: this.instanceId,
+        Name: amiName,
+        Description: `Open-Inspect image build ${body.buildId}`,
+        NoReboot: "true",
+      });
+
+      const newAmiId = createImageResult.imageId;
+      if (!newAmiId) {
+        throw new Error(`Failed to create AMI: ${JSON.stringify(createImageResult)}`);
+      }
+
+      console.log(`Image build ${body.buildId}: AMI ${newAmiId} creation started`);
+
+      // 4. Wait for AMI to become available
+      await this.waitForAmiAvailable(newAmiId, AMI_CREATION_TIMEOUT_MS);
+
+      const buildDurationSeconds = Math.round((Date.now() - startedAt) / 1000);
+
+      console.log(
+        `Image build ${body.buildId}: AMI ${newAmiId} available (${buildDurationSeconds}s)`
+      );
+
+      // 5. Terminate the build instance
+      await this.awsRequest("TerminateInstances", { InstanceId: [this.instanceId] });
+
+      this.status = "complete";
+      await this.ctx.storage.put("status", this.status);
+
+      // 6. Callback to control plane
+      await this.sendCallback(body.callbackUrl, {
+        build_id: body.buildId,
+        provider_image_id: newAmiId,
+        build_duration_seconds: buildDurationSeconds,
+      });
+
+      // Clean up DO storage
+      await this.ctx.storage.deleteAll();
+
+      return Response.json({
+        success: true,
+        buildId: body.buildId,
+        amiId: newAmiId,
+        buildDurationSeconds,
+      });
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error(`Image build ${body.buildId} failed: ${errorMessage}`);
+
+      this.status = "failed";
+      await this.ctx.storage.put("status", this.status);
+
+      // Terminate instance if it was launched
+      if (this.instanceId) {
+        try {
+          await this.awsRequest("TerminateInstances", { InstanceId: [this.instanceId] });
+        } catch {
+          // Best-effort cleanup
+        }
+      }
+
+      // Callback failure to control plane
+      const failedCallbackUrl = body.callbackUrl.replace("/build-complete", "/build-failed");
+      try {
+        await this.sendCallback(failedCallbackUrl, {
+          build_id: body.buildId,
+          error: errorMessage,
+        });
+      } catch {
+        // Best-effort callback
+      }
+
+      await this.ctx.storage.deleteAll();
+
+      return Response.json(
+        { success: false, buildId: body.buildId, error: errorMessage },
+        { status: 500 }
+      );
+    }
+  }
+
+  private async waitForInstanceState(
+    instanceId: string,
+    targetState: string,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const pollIntervalMs = 15_000;
+
+    while (Date.now() < deadline) {
+      const result = await this.awsRequest("DescribeInstanceStatus", {
+        InstanceId: [instanceId],
+        IncludeAllInstances: "true",
+      });
+
+      if (result.instanceState?.name === targetState) {
+        return;
+      }
+
+      // If instance terminated unexpectedly, fail early
+      if (result.instanceState?.name === "terminated") {
+        throw new Error(`Instance ${instanceId} terminated unexpectedly during setup`);
+      }
+
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+
+    throw new Error(`Timeout waiting for instance ${instanceId} to reach state "${targetState}"`);
+  }
+
+  private async waitForAmiAvailable(amiId: string, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const pollIntervalMs = 15_000;
+
+    while (Date.now() < deadline) {
+      const result = await this.awsRequest("DescribeImages", {
+        ImageId: [amiId],
+      });
+
+      if (result.imageState === "available") {
+        return;
+      }
+
+      if (result.imageState === "failed" || result.imageState === "error") {
+        throw new Error(`AMI ${amiId} creation failed with state: ${result.imageState}`);
+      }
+
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+
+    throw new Error(`Timeout waiting for AMI ${amiId} to become available`);
+  }
+
+  private async sendCallback(url: string, body: Record<string, unknown>): Promise<void> {
+    const maxRetries = 3;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (response.ok) return;
+        console.warn(`Callback attempt ${attempt + 1} failed: ${response.status}`);
+      } catch (e) {
+        console.warn(`Callback attempt ${attempt + 1} error: ${e}`);
+      }
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, Math.pow(2, attempt + 1) * 1000));
+      }
+    }
+    throw new Error(`Failed to send callback to ${url} after ${maxRetries + 1} attempts`);
+  }
+
+  private async awsRequest(action: string, params: Record<string, unknown>): Promise<AwsXmlResult> {
+    const url = new URL(`https://ec2.${this.env.AWS_REGION}.amazonaws.com/`);
+    url.searchParams.set("Action", action);
+    url.searchParams.set("Version", "2016-11-15");
+
+    this.flattenParams(params).forEach(([key, value]) => {
+      url.searchParams.set(key, value);
+    });
+
+    const response = await this.aws.fetch(url.toString());
+    const text = await response.text();
+
+    if (!response.ok) {
+      throw new Error(`AWS API error (${action}): ${response.status} ${text}`);
+    }
+
+    return parseAwsXml(text);
+  }
+
+  private flattenParams(params: Record<string, unknown>, prefix = ""): [string, string][] {
+    let result: [string, string][] = [];
+    for (const [key, value] of Object.entries(params)) {
+      const fullKey = prefix ? `${prefix}.${key}` : key;
+      if (Array.isArray(value)) {
+        value.forEach((v: unknown, i) => {
+          if (typeof v === "object" && v !== null) {
+            result = result.concat(
+              this.flattenParams(v as Record<string, unknown>, `${fullKey}.${i + 1}`)
+            );
+          } else {
+            result.push([`${fullKey}.${i + 1}`, String(v)]);
+          }
+        });
+      } else if (typeof value === "object" && value !== null) {
+        result = result.concat(this.flattenParams(value as Record<string, unknown>, fullKey));
+      } else {
+        result.push([fullKey, String(value)]);
+      }
+    }
+    return result;
   }
 }

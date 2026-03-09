@@ -43,6 +43,8 @@ export interface EC2DeployRequest {
   userEnvVars?: Record<string, string>;
   timeoutSeconds?: number;
   scmProvider?: "github" | "bitbucket";
+  /** Optional repo-specific AMI ID from image builder. Uses base AMI if not provided. */
+  amiId?: string;
 }
 
 export interface EC2DeployResponse {
@@ -122,6 +124,25 @@ export class EC2ApiClient {
 
     return (await response.json()) as { success: boolean };
   }
+
+  async buildImage(request: {
+    buildId: string;
+    setupScript: string;
+    callbackUrl: string;
+  }): Promise<{ success: boolean; buildId: string }> {
+    const response = await fetch(`${this.config.apiUrl}/build-image`, {
+      method: "POST",
+      headers: await this.getHeaders(),
+      body: JSON.stringify(request),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`EC2 image build error: ${response.status} ${text}`);
+    }
+
+    return (await response.json()) as { success: boolean; buildId: string };
+  }
 }
 
 // ==================== EC2 Sandbox Provider ====================
@@ -162,6 +183,7 @@ export class EC2SandboxProvider implements SandboxProvider {
         agent: config.agent,
         userEnvVars: config.userEnvVars,
         timeoutSeconds: config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+        amiId: config.repoImageId ?? undefined,
       });
 
       if (!result.success) {

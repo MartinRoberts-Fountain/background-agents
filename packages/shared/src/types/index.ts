@@ -351,6 +351,8 @@ export interface RepoMetadata {
   aliases?: string[];
   channelAssociations?: string[];
   keywords?: string[];
+  /** Setup script for EC2 image builder. Runs on base AMI to produce a repo-specific AMI. */
+  setupScript?: string;
 }
 
 export interface EnrichedRepository extends InstallationRepository {
