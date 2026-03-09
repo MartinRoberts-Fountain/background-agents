@@ -64,6 +64,7 @@ export function SessionRightSidebarContent({
           artifacts={artifacts}
           parentSessionId={sessionState.parentSessionId}
           sandboxProvider={sessionState.sandboxProvider}
+          sandboxUrl={sessionState.sandboxUrl}
         />
       </div>
 

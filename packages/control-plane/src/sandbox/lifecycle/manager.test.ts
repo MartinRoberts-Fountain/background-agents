@@ -76,6 +76,7 @@ function createMockSandbox(
     last_activity: Date.now() - 30000,
     last_spawn_error: null,
     last_spawn_error_at: null,
+    sandbox_url: null,
     created_at: Date.now() - 60000,
     spawn_failure_count: 0,
     last_spawn_failure: 0,
@@ -131,6 +132,10 @@ function createMockStorage(
     updateSandboxModalObjectId: vi.fn((id: string) => {
       calls.push(`updateSandboxModalObjectId:${id}`);
       if (sandbox) sandbox.modal_object_id = id;
+    }),
+    updateSandboxUrl: vi.fn((url: string) => {
+      calls.push(`updateSandboxUrl:${url}`);
+      if (sandbox) sandbox.sandbox_url = url;
     }),
     updateSandboxSnapshotImageId: vi.fn((sandboxId: string, imageId: string) => {
       calls.push(`updateSandboxSnapshotImageId:${imageId}`);

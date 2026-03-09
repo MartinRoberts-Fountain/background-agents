@@ -323,6 +323,7 @@ export interface SessionState {
   isProcessing?: boolean;
   parentSessionId?: string | null;
   sandboxProvider?: "modal" | "helm" | "ec2" | null;
+  sandboxUrl?: string | null;
 }
 
 // Participant presence info

@@ -338,6 +338,13 @@ export class SessionRepository {
     );
   }
 
+  updateSandboxUrl(sandboxUrl: string): void {
+    this.sql.exec(
+      `UPDATE sandbox SET sandbox_url = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      sandboxUrl
+    );
+  }
+
   updateSandboxSnapshotImageId(sandboxId: string, imageId: string): void {
     this.sql.exec(`UPDATE sandbox SET snapshot_image_id = ? WHERE id = ?`, imageId, sandboxId);
   }

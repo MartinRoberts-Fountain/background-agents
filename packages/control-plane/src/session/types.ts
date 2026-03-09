@@ -105,6 +105,7 @@ export interface SandboxRow {
   last_activity: number | null; // Last activity timestamp for inactivity-based snapshot
   last_spawn_error: string | null;
   last_spawn_error_at: number | null;
+  sandbox_url: string | null; // Public URL for accessing the sandbox (e.g. via Cloudflare Tunnel)
   created_at: number;
 }
 

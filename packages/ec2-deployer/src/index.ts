@@ -65,6 +65,10 @@ export interface Env {
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_API_TOKEN: string;
   CLOUDFLARE_TUNNEL_SECRET: string;
+  /** Zone ID for the domain used for sandbox tunnel hostnames (e.g. zone for sandboxes.example.com) */
+  CLOUDFLARE_ZONE_ID: string;
+  /** Base domain for sandbox tunnel hostnames (e.g. "sandboxes.example.com") */
+  CLOUDFLARE_TUNNEL_DOMAIN: string;
 }
 
 /**
@@ -219,6 +223,9 @@ export class EC2InstanceDO extends DurableObject<Env> {
   private instanceId: string | null = null;
   private tunnelId: string | null = null;
   private tunnelToken: string | null = null;
+  private sandboxHostname: string | null = null;
+  private accessAppId: string | null = null;
+  private dnsRecordId: string | null = null;
   private status: string = "pending";
   private createdAt: number = 0;
   private aws: AwsClient;
@@ -235,6 +242,9 @@ export class EC2InstanceDO extends DurableObject<Env> {
       this.instanceId = (await this.ctx.storage.get<string>("instanceId")) || null;
       this.tunnelId = (await this.ctx.storage.get<string>("tunnelId")) || null;
       this.tunnelToken = (await this.ctx.storage.get<string>("tunnelToken")) || null;
+      this.sandboxHostname = (await this.ctx.storage.get<string>("sandboxHostname")) || null;
+      this.accessAppId = (await this.ctx.storage.get<string>("accessAppId")) || null;
+      this.dnsRecordId = (await this.ctx.storage.get<string>("dnsRecordId")) || null;
       this.status = (await this.ctx.storage.get<string>("status")) || "pending";
       this.createdAt = (await this.ctx.storage.get<number>("createdAt")) || 0;
     });
@@ -265,6 +275,7 @@ export class EC2InstanceDO extends DurableObject<Env> {
         success: true,
         sandboxId: ((await request.json()) as DeployBody).sandboxId,
         providerObjectId: this.ctx.id.toString(),
+        sandboxUrl: this.sandboxHostname ? `https://${this.sandboxHostname}` : null,
         status: this.status,
         createdAt: this.createdAt,
       });
@@ -283,26 +294,40 @@ export class EC2InstanceDO extends DurableObject<Env> {
       await this.ctx.storage.put("tunnelId", this.tunnelId);
       await this.ctx.storage.put("tunnelToken", this.tunnelToken);
 
-      // 2. Launch EC2 Instance
+      // 2. Configure tunnel ingress route → port 8200 on the EC2 instance
+      this.sandboxHostname = `${body.sandboxId}.${this.env.CLOUDFLARE_TUNNEL_DOMAIN}`;
+      await this.ctx.storage.put("sandboxHostname", this.sandboxHostname);
+      await this.configureTunnelRoute(this.tunnelId, this.sandboxHostname);
+
+      // 3. Create CNAME DNS record pointing hostname to the tunnel
+      this.dnsRecordId = await this.createTunnelDnsRecord(this.tunnelId, this.sandboxHostname);
+      await this.ctx.storage.put("dnsRecordId", this.dnsRecordId);
+
+      // 4. Create Cloudflare Access application to gate access to the hostname
+      this.accessAppId = await this.createAccessApplication(this.sandboxHostname);
+      await this.ctx.storage.put("accessAppId", this.accessAppId);
+
+      // 5. Launch EC2 Instance
       this.instanceId = await this.launchEC2Instance(body, this.tunnelToken!);
       await this.ctx.storage.put("instanceId", this.instanceId);
 
       this.status = "spawning";
       await this.ctx.storage.put("status", this.status);
 
-      // 3. Wait for tunnel to come online
+      // 6. Wait for tunnel to come online
       await this.waitForTunnelOnline(this.tunnelId!);
 
       this.status = "running";
       await this.ctx.storage.put("status", this.status);
 
-      // 4. Schedule 24-hour auto-teardown
+      // 7. Schedule 24-hour auto-teardown
       await this.ctx.storage.setAlarm(Date.now() + 24 * 60 * 60 * 1000);
 
       return Response.json({
         success: true,
         sandboxId: body.sandboxId,
         providerObjectId: this.ctx.id.toString(),
+        sandboxUrl: `https://${this.sandboxHostname}`,
         status: this.status,
         createdAt: this.createdAt,
       });
@@ -352,6 +377,12 @@ export class EC2InstanceDO extends DurableObject<Env> {
     if (this.instanceId) {
       await this.awsRequest("TerminateInstances", { InstanceId: [this.instanceId] });
     }
+    if (this.accessAppId) {
+      await this.deleteAccessApplication(this.accessAppId);
+    }
+    if (this.dnsRecordId) {
+      await this.deleteDnsRecord(this.dnsRecordId);
+    }
     if (this.tunnelId) {
       await this.deleteCloudflareTunnel(this.tunnelId);
     }
@@ -359,6 +390,9 @@ export class EC2InstanceDO extends DurableObject<Env> {
     this.instanceId = null;
     this.tunnelId = null;
     this.tunnelToken = null;
+    this.sandboxHostname = null;
+    this.accessAppId = null;
+    this.dnsRecordId = null;
     this.status = "deleted";
   }
 
@@ -452,6 +486,126 @@ systemctl restart sandbox-supervisor
     );
 
     return { id: tunnelId, token };
+  }
+
+  /**
+   * Configure the tunnel ingress rule to route traffic from the public hostname
+   * to port 8200 on the EC2 instance running cloudflared.
+   */
+  private async configureTunnelRoute(tunnelId: string, hostname: string): Promise<void> {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/tunnels/${tunnelId}/configurations`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${this.env.CLOUDFLARE_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          config: {
+            ingress: [
+              { hostname, service: "http://localhost:8200" },
+              { service: "http_status:404" }, // catch-all required by cloudflared
+            ],
+          },
+        }),
+      }
+    );
+    const result = (await response.json()) as CloudflareApiResponse<unknown>;
+    if (!result.success) {
+      throw new Error(`Failed to configure tunnel route: ${JSON.stringify(result.errors)}`);
+    }
+  }
+
+  /**
+   * Create a CNAME DNS record pointing the sandbox hostname to the tunnel.
+   */
+  private async createTunnelDnsRecord(tunnelId: string, hostname: string): Promise<string> {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.env.CLOUDFLARE_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          type: "CNAME",
+          name: hostname,
+          content: `${tunnelId}.cfargotunnel.com`,
+          proxied: true,
+          comment: `Open-Inspect sandbox tunnel`,
+        }),
+      }
+    );
+    const result = (await response.json()) as CloudflareApiResponse<{ id: string }>;
+    if (!result.success) {
+      throw new Error(`Failed to create DNS record: ${JSON.stringify(result.errors)}`);
+    }
+    return result.result.id;
+  }
+
+  /**
+   * Delete a DNS record by ID.
+   */
+  private async deleteDnsRecord(recordId: string): Promise<void> {
+    await fetch(
+      `https://api.cloudflare.com/client/v4/zones/${this.env.CLOUDFLARE_ZONE_ID}/dns_records/${recordId}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${this.env.CLOUDFLARE_API_TOKEN}` },
+      }
+    );
+  }
+
+  /**
+   * Create a Cloudflare Access application that gates access to the sandbox hostname.
+   * Uses a self-hosted application with a service auth policy (placeholder).
+   */
+  private async createAccessApplication(hostname: string): Promise<string> {
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/apps`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.env.CLOUDFLARE_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: `sandbox-${hostname}`,
+          domain: hostname,
+          type: "self_hosted",
+          session_duration: "24h",
+          // Allow all authenticated users through the Access login page.
+          // Refine with specific policies (e.g. email domain, IdP group) as needed.
+          policies: [
+            {
+              name: "Allow authenticated users",
+              decision: "allow",
+              include: [{ everyone: {} }],
+            },
+          ],
+        }),
+      }
+    );
+    const result = (await response.json()) as CloudflareApiResponse<{ id: string }>;
+    if (!result.success) {
+      throw new Error(`Failed to create Access application: ${JSON.stringify(result.errors)}`);
+    }
+    return result.result.id;
+  }
+
+  /**
+   * Delete a Cloudflare Access application.
+   */
+  private async deleteAccessApplication(appId: string): Promise<void> {
+    await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${this.env.CLOUDFLARE_ACCOUNT_ID}/access/apps/${appId}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${this.env.CLOUDFLARE_API_TOKEN}` },
+      }
+    );
   }
 
   private async deleteCloudflareTunnel(tunnelId: string) {

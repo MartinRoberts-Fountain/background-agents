@@ -69,6 +69,8 @@ export interface CreateSandboxResult {
   sandboxId: string;
   /** Provider's internal object ID (e.g., Modal's object ID for snapshot API) */
   providerObjectId?: string;
+  /** Public URL for accessing the sandbox (e.g. via Cloudflare Tunnel) */
+  sandboxUrl?: string;
   /** Initial sandbox status */
   status: string;
   /** Creation timestamp */

@@ -164,6 +164,7 @@ function createSandboxRow(modalSandboxId: string): SandboxRow {
     last_activity: null,
     last_spawn_error: null,
     last_spawn_error_at: null,
+    sandbox_url: null,
     created_at: Date.now(),
   };
 }

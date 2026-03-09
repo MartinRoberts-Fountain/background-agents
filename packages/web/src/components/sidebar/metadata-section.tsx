@@ -29,6 +29,7 @@ interface MetadataSectionProps {
   artifacts?: Artifact[];
   parentSessionId?: string | null;
   sandboxProvider?: "modal" | "helm" | "ec2" | null;
+  sandboxUrl?: string | null;
 }
 
 export function MetadataSection({
@@ -42,6 +43,7 @@ export function MetadataSection({
   artifacts = [],
   parentSessionId,
   sandboxProvider,
+  sandboxUrl,
 }: MetadataSectionProps) {
   const [copied, setCopied] = useState(false);
 
@@ -107,6 +109,21 @@ export function MetadataSection({
                 ? "EC2"
                 : "Modal"}
           </span>
+        </div>
+      )}
+
+      {/* Sandbox URL */}
+      {sandboxUrl && (
+        <div className="flex items-center gap-2 text-sm">
+          <ServerIcon className="w-4 h-4 text-muted-foreground" />
+          <a
+            href={sandboxUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-accent hover:underline"
+          >
+            Open Sandbox
+          </a>
         </div>
       )}
 

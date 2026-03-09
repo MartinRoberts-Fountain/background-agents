@@ -72,6 +72,8 @@ export interface SandboxStorage {
   }): void;
   /** Update sandbox Modal object ID (for snapshot API) */
   updateSandboxModalObjectId(modalObjectId: string): void;
+  /** Update sandbox public URL (e.g. Cloudflare Tunnel URL) */
+  updateSandboxUrl(sandboxUrl: string): void;
   /** Update sandbox snapshot image ID */
   updateSandboxSnapshotImageId(sandboxId: string, imageId: string): void;
   /** Update last activity timestamp */
@@ -420,6 +422,11 @@ export class SandboxLifecycleManager {
       // Store provider's internal object ID for snapshot API
       if (result.providerObjectId) {
         this.storage.updateSandboxModalObjectId(result.providerObjectId);
+      }
+
+      // Store sandbox URL if the provider returned one (e.g. EC2 via Cloudflare Tunnel)
+      if (result.sandboxUrl) {
+        this.storage.updateSandboxUrl(result.sandboxUrl);
       }
 
       this.storage.updateSandboxStatus("connecting");

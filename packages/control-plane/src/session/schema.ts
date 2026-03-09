@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS sandbox (
   last_activity INTEGER,                            -- Last activity timestamp for inactivity-based snapshot
   last_spawn_error TEXT,                            -- Last sandbox spawn error (if any)
   last_spawn_error_at INTEGER,                      -- Timestamp of last spawn error
+  sandbox_url TEXT,                                 -- Public URL for accessing the sandbox (e.g. via Cloudflare Tunnel)
   spawn_failure_count INTEGER DEFAULT 0,            -- Circuit breaker: consecutive spawn failures
   last_spawn_failure INTEGER,                       -- Timestamp of last spawn failure
   created_at INTEGER NOT NULL

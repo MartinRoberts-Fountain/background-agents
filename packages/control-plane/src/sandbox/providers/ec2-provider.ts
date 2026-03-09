@@ -49,6 +49,7 @@ export interface EC2DeployResponse {
   success: boolean;
   sandboxId: string;
   providerObjectId: string; // The EC2 Instance ID or Durable Object ID
+  sandboxUrl: string | null;
   status: string;
   createdAt: number;
   error?: string;
@@ -177,6 +178,7 @@ export class EC2SandboxProvider implements SandboxProvider {
       return {
         sandboxId: result.sandboxId,
         providerObjectId: result.providerObjectId,
+        sandboxUrl: result.sandboxUrl ?? undefined,
         status: result.status,
         createdAt: result.createdAt,
       };
