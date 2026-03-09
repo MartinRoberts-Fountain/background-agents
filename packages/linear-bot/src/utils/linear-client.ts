@@ -217,7 +217,7 @@ export async function fetchIssueDetails(
           project { id name }
           assignee { id name }
           team { id key name }
-          comments(first: 10, orderBy: createdAt) {
+          comments(last: 50, orderBy: createdAt) {
             nodes {
               body
               user { name }

@@ -48,10 +48,12 @@ class SandboxSupervisor:
     DEFAULT_SETUP_TIMEOUT_SECONDS = 300
     DEFAULT_START_TIMEOUT_SECONDS = 120
     CLONE_DEPTH_COMMITS = 100
+    PROXY_SCRIPT_PATH = "/app/sandbox/proxy.mjs"
 
     def __init__(self):
         self.opencode_process: asyncio.subprocess.Process | None = None
         self.bridge_process: asyncio.subprocess.Process | None = None
+        self.proxy_process: asyncio.subprocess.Process | None = None
         self.shutdown_event = asyncio.Event()
         self.git_sync_complete = asyncio.Event()
         self.opencode_ready = asyncio.Event()
@@ -111,11 +113,12 @@ class SandboxSupervisor:
             authenticated=bool(self.vcs_clone_token),
         )
 
+        clone_depth = self.CLONE_DEPTH_COMMITS if self.boot_mode == "build" else 1
         result = await asyncio.create_subprocess_exec(
             "git",
             "clone",
             "--depth",
-            str(self.CLONE_DEPTH_COMMITS),
+            str(clone_depth),
             "--branch",
             self.base_branch,
             self._build_repo_url(),
@@ -495,12 +498,49 @@ class SandboxSupervisor:
         except Exception as e:
             print(f"[supervisor] Bridge log forwarding error: {e}")
 
+    async def start_proxy(self) -> None:
+        """Start the proxy process."""
+        proxy_path = Path(self.PROXY_SCRIPT_PATH)
+        if not proxy_path.exists():
+            self.log.info("proxy.skip", reason="no_proxy_script")
+            return
+
+        self.proxy_process = await asyncio.create_subprocess_exec(
+            "node",
+            str(proxy_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        self.log.info("proxy.started")
+
     async def monitor_processes(self) -> None:
         """Monitor child processes and restart on crash."""
         restart_count = 0
         bridge_restart_count = 0
+        proxy_restart_count = 0
 
         while not self.shutdown_event.is_set():
+            # Check proxy process
+            if self.proxy_process and self.proxy_process.returncode is not None:
+                exit_code = self.proxy_process.returncode
+                proxy_restart_count += 1
+
+                self.log.error(
+                    "proxy.crash", exit_code=exit_code, restart_count=proxy_restart_count
+                )
+
+                if proxy_restart_count > self.MAX_RESTARTS:
+                    self.log.error("proxy.max_restarts", restart_count=proxy_restart_count)
+                    await self._report_fatal_error(
+                        f"Proxy crashed {proxy_restart_count} times, giving up"
+                    )
+                    self.shutdown_event.set()
+                    break
+
+                delay = min(self.BACKOFF_BASE**proxy_restart_count, self.BACKOFF_MAX)
+                await asyncio.sleep(delay)
+                await self.start_proxy()
+
             # Check OpenCode process
             if self.opencode_process and self.opencode_process.returncode is not None:
                 exit_code = self.opencode_process.returncode
@@ -857,6 +897,14 @@ class SandboxSupervisor:
     async def shutdown(self) -> None:
         """Graceful shutdown of all processes."""
         self.log.info("supervisor.shutdown_start")
+
+        # Terminate proxy
+        if self.proxy_process and self.proxy_process.returncode is None:
+            self.proxy_process.terminate()
+            try:
+                await asyncio.wait_for(self.proxy_process.wait(), timeout=5.0)
+            except TimeoutError:
+                self.proxy_process.kill()
 
         # Terminate bridge first
         if self.bridge_process and self.bridge_process.returncode is None:

@@ -59,6 +59,24 @@ async function getAuthHeaders(env: Env, traceId?: string): Promise<Record<string
   return headers;
 }
 
+async function fetchModeSystemPrompt(
+  env: Env,
+  headers: Record<string, string>,
+  mode: string
+): Promise<string> {
+  try {
+    const res = await env.CONTROL_PLANE.fetch(`https://internal/mode-templates/${mode}`, {
+      method: "GET",
+      headers,
+    });
+    if (!res.ok) return "";
+    const data = (await res.json()) as { systemPrompt?: string };
+    return data.systemPrompt ?? "";
+  } catch {
+    return "";
+  }
+}
+
 // ─── Sub-handlers ────────────────────────────────────────────────────────────
 
 async function handleStop(webhook: AgentSessionWebhook, env: Env, traceId: string): Promise<void> {
@@ -177,7 +195,9 @@ async function handleFollowUp(
 
   let promptContent: string;
   if (isPlanMode) {
-    promptContent = `Follow-up on ${issue.identifier} — the user has provided feedback on the plan. Please revise the plan based on their comments and provide an updated implementation plan.\n\n**User feedback:**\n${followUpContent}${sessionContext}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Revise your previous plan based on the feedback above. Provide the complete updated plan, not just the changes. The plans should not be overengineered or unnecessarily complex.`;
+    const planSystemPrompt = await fetchModeSystemPrompt(env, headers, "plan");
+    const modeInstruction = planSystemPrompt ? `\n\n${planSystemPrompt}` : "";
+    promptContent = `Follow-up on ${issue.identifier} — the user has provided feedback on the plan. Please revise the plan based on their comments and provide an updated implementation plan.\n\n**User feedback:**\n${followUpContent}${sessionContext}${modeInstruction}`;
   } else {
     promptContent = `Follow-up on ${issue.identifier}:\n\n${followUpContent}${sessionContext}`;
   }
@@ -502,14 +522,14 @@ async function handleNewSession(
   // ─── Build and send prompt ────────────────────────────────────────────
 
   // Prefer Linear's promptContext (includes issue, comments, guidance)
+  const modeSystemPrompt = await fetchModeSystemPrompt(env, headers, mode);
   const basePrompt =
-    webhook.agentSession.promptContext || buildPrompt(issue, issueDetails, comment, mode);
+    webhook.agentSession.promptContext ||
+    buildPrompt(issue, issueDetails, comment, mode, modeSystemPrompt);
   const prompt =
-    mode === "plan" && webhook.agentSession.promptContext
-      ? `${basePrompt}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations. The plans should not be overengineered or unnecessarily complex.`
-      : mode === "apply" && webhook.agentSession.promptContext
-        ? `${basePrompt}\n\nIMPORTANT: You are in APPLY mode. Create a new branch, implement all changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the \`spawn-task\` tool to spawn any large or complex tasks that can be done independently of the main task to create a seperate pull request.`
-        : basePrompt;
+    webhook.agentSession.promptContext && modeSystemPrompt
+      ? `${basePrompt}\n\n${modeSystemPrompt}`
+      : basePrompt;
   const callbackContext: CallbackContext = {
     source: "linear",
     issueId: issue.id,
@@ -736,10 +756,10 @@ export async function handleIssueStatusChange(
     promptParts.push("(No description provided)");
   }
 
-  promptParts.push(
-    "",
-    "IMPORTANT: You are in APPLY mode. A planning session has already analyzed this issue and produced a plan. Create a new branch off the base branch, implement the changes according to the plan, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a separate pull request."
-  );
+  const applySystemPrompt = await fetchModeSystemPrompt(env, headers, "apply");
+  if (applySystemPrompt) {
+    promptParts.push("", applySystemPrompt);
+  }
 
   const callbackContext: CallbackContext = {
     source: "linear",
@@ -873,7 +893,8 @@ function buildPrompt(
   issue: { identifier: string; title: string; description?: string | null; url: string },
   issueDetails: LinearIssueDetails | null,
   comment?: { body: string } | null,
-  mode: SessionMode = "apply"
+  _mode: SessionMode = "apply",
+  modeSystemPrompt = ""
 ): string {
   const SESSION_THREAD_MARKER = "This thread is for an agent session with fountaincodingagent.";
 
@@ -915,16 +936,17 @@ function buildPrompt(
       parts.push(`**Priority:** ${issueDetails.priorityLabel}`);
     }
 
-    // Include recent comments for context
-    const recentComments = issueDetails.comments
-      .filter((c) => !isSessionThreadMarkerComment(c.body))
-      .slice(-5);
+    // Include comments for context, excluding bot-generated and unknown-author comments
+    const EXCLUDED_AUTHORS = new Set(["Fountain Coding Agent", "Unknown"]);
+    const filteredComments = issueDetails.comments.filter(
+      (c) =>
+        !isSessionThreadMarkerComment(c.body) && c.user?.name && !EXCLUDED_AUTHORS.has(c.user.name)
+    );
 
-    if (recentComments.length > 0) {
-      parts.push("", "---", "**Recent comments:**");
-      for (const c of recentComments) {
-        const author = c.user?.name || "Unknown";
-        parts.push(`- **${author}:** ${c.body.slice(0, 200)}`);
+    if (filteredComments.length > 0) {
+      parts.push("", "---", "**Comments:**");
+      for (const c of filteredComments) {
+        parts.push(`- **${c.user!.name}:** ${c.body}`);
       }
     }
   }
@@ -933,16 +955,8 @@ function buildPrompt(
     parts.push("", "---", `**Agent instruction:** ${comment.body}`);
   }
 
-  if (mode === "plan") {
-    parts.push(
-      "",
-      "IMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations. The plans should not be overengineered or unnecessarily complex."
-    );
-  } else {
-    parts.push(
-      "",
-      "IMPORTANT: You are in APPLY mode. Create a new branch off the base branch, implement the changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. You MUST open a pull request before finishing. Use the `spawn-task` tool to spawn any large or complex tasks that can be done independently of the main task to create a seperate pull request."
-    );
+  if (modeSystemPrompt) {
+    parts.push("", modeSystemPrompt);
   }
 
   return parts.join("\n");
