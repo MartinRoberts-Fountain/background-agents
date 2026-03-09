@@ -309,7 +309,10 @@ async function requireInternalAuth(
       has_auth_header: !!authHeader,
       auth_header_prefix: authHeader?.slice(0, 10),
     });
-    return error(`Unauthorized: HMAC signature verification failed (Path: ${path}, Trace ID: ${ctx.trace_id})`, 401);
+    return error(
+      `Unauthorized: HMAC signature verification failed (Path: ${path}, Trace ID: ${ctx.trace_id})`,
+      401
+    );
   }
 
   return null; // Auth passed

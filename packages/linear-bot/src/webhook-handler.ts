@@ -243,7 +243,11 @@ async function handleFollowUp(
       });
     } catch {
       if (env.LINEAR_API_KEY) {
-        await postIssueComment(env.LINEAR_API_KEY, issue.id, `⚠️ **Open-Inspect Error**: ${errorBody}`);
+        await postIssueComment(
+          env.LINEAR_API_KEY,
+          issue.id,
+          `⚠️ **Open-Inspect Error**: ${errorBody}`
+        );
       }
     }
   }
@@ -515,7 +519,11 @@ async function handleNewSession(
       });
     } catch {
       if (env.LINEAR_API_KEY) {
-        await postIssueComment(env.LINEAR_API_KEY, issue.id, `⚠️ **Open-Inspect Error**: ${errorBody}`);
+        await postIssueComment(
+          env.LINEAR_API_KEY,
+          issue.id,
+          `⚠️ **Open-Inspect Error**: ${errorBody}`
+        );
       }
     }
     log.error("control_plane.create_session", {
@@ -603,7 +611,11 @@ async function handleNewSession(
       });
     } catch {
       if (env.LINEAR_API_KEY) {
-        await postIssueComment(env.LINEAR_API_KEY, issue.id, `⚠️ **Open-Inspect Error**: ${errorBody}`);
+        await postIssueComment(
+          env.LINEAR_API_KEY,
+          issue.id,
+          `⚠️ **Open-Inspect Error**: ${errorBody}`
+        );
       }
     }
     log.error("control_plane.send_prompt", {
