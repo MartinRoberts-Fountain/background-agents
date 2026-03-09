@@ -116,6 +116,18 @@ function GlobalSettingsSection({
   const [commentActionInstructions, setCommentActionInstructions] = useState(
     settings?.defaults?.commentActionInstructions ?? ""
   );
+  const [ciFixEnabled, setCiFixEnabled] = useState(settings?.defaults?.ciFixEnabled ?? false);
+  const [ciFixBranchPatterns, setCiFixBranchPatterns] = useState(
+    (settings?.defaults?.ciFixBranchPatterns ?? ["agent/*"]).join(", ")
+  );
+  const [ciFixActors, setCiFixActors] = useState<string[]>(settings?.defaults?.ciFixActors ?? []);
+  const [ciFixActorMode, setCiFixActorMode] = useState<"write_access" | "specific">(
+    settings?.defaults?.ciFixActors === undefined ? "write_access" : "specific"
+  );
+  const [ciFixInstructions, setCiFixInstructions] = useState(
+    settings?.defaults?.ciFixInstructions ?? ""
+  );
+  const [newCiFixActor, setNewCiFixActor] = useState("");
   const [newUsername, setNewUsername] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -135,6 +147,13 @@ function GlobalSettingsSection({
         );
         setCodeReviewInstructions(settings.defaults?.codeReviewInstructions ?? "");
         setCommentActionInstructions(settings.defaults?.commentActionInstructions ?? "");
+        setCiFixEnabled(settings.defaults?.ciFixEnabled ?? false);
+        setCiFixBranchPatterns((settings.defaults?.ciFixBranchPatterns ?? ["agent/*"]).join(", "));
+        setCiFixActors(settings.defaults?.ciFixActors ?? []);
+        setCiFixActorMode(
+          settings.defaults?.ciFixActors === undefined ? "write_access" : "specific"
+        );
+        setCiFixInstructions(settings.defaults?.ciFixInstructions ?? "");
       }
       setInitialized(true);
     }
@@ -167,6 +186,12 @@ function GlobalSettingsSection({
         setTriggerUserMode("write_access");
         setCodeReviewInstructions("");
         setCommentActionInstructions("");
+        setCiFixEnabled(false);
+        setCiFixBranchPatterns("agent/*");
+        setCiFixActors([]);
+        setCiFixActorMode("write_access");
+        setCiFixInstructions("");
+        setNewCiFixActor("");
         setNewUsername("");
         setDirty(false);
         setSuccess("Settings reset to defaults.");
@@ -186,12 +211,23 @@ function GlobalSettingsSection({
     setError("");
     setSuccess("");
 
+    const parsedBranchPatterns = ciFixBranchPatterns
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+
     const body: GitHubGlobalConfig = {
       defaults: {
         autoReviewOnOpen,
         ...(triggerUserMode === "specific" ? { allowedTriggerUsers } : {}),
         ...(codeReviewInstructions ? { codeReviewInstructions } : {}),
         ...(commentActionInstructions ? { commentActionInstructions } : {}),
+        ciFixEnabled,
+        ...(ciFixEnabled && parsedBranchPatterns.length > 0
+          ? { ciFixBranchPatterns: parsedBranchPatterns }
+          : {}),
+        ...(ciFixEnabled && ciFixActorMode === "specific" ? { ciFixActors } : {}),
+        ...(ciFixEnabled && ciFixInstructions ? { ciFixInstructions } : {}),
       },
     };
 
@@ -226,6 +262,17 @@ function GlobalSettingsSection({
     if (trimmed && !allowedTriggerUsers.includes(trimmed)) {
       setAllowedTriggerUsers((prev) => [...prev, trimmed]);
       setNewUsername("");
+      setDirty(true);
+      setError("");
+      setSuccess("");
+    }
+  };
+
+  const addCiFixActor = () => {
+    const trimmed = newCiFixActor.trim().toLowerCase();
+    if (trimmed && !ciFixActors.includes(trimmed)) {
+      setCiFixActors((prev) => [...prev, trimmed]);
+      setNewCiFixActor("");
       setDirty(true);
       setError("");
       setSuccess("");
@@ -467,6 +514,165 @@ function GlobalSettingsSection({
           placeholder="e.g., Always run tests before pushing changes. Prefer minimal diffs."
           className="w-full px-3 py-2 text-sm border border-border rounded-sm bg-background text-foreground placeholder:text-muted-foreground resize-y"
         />
+      </div>
+
+      <div className="border-t border-border-muted pt-4 mt-4 mb-4">
+        <label className="flex items-center justify-between px-4 py-3 border border-border hover:bg-muted/50 transition cursor-pointer mb-4 rounded-sm">
+          <div>
+            <span className="text-sm font-medium text-foreground">Auto-fix CI failures</span>
+            <span className="text-sm text-muted-foreground ml-2">
+              Spawn an EC2 agent session when CI checks fail on matching branches
+            </span>
+          </div>
+          <div className="relative">
+            <input
+              type="checkbox"
+              checked={ciFixEnabled}
+              onChange={() => {
+                setCiFixEnabled(!ciFixEnabled);
+                setDirty(true);
+                setError("");
+                setSuccess("");
+              }}
+              className="sr-only peer"
+            />
+            <div className="w-9 h-5 bg-muted rounded-full peer-checked:bg-accent transition-colors" />
+            <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+          </div>
+        </label>
+
+        {ciFixEnabled && (
+          <>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-foreground mb-1">
+                Branch Patterns
+              </label>
+              <p className="text-xs text-muted-foreground mb-2">
+                Comma-separated glob patterns for branches eligible for CI auto-fix. Use * to match
+                any characters (e.g., agent/*, feature/*).
+              </p>
+              <input
+                type="text"
+                value={ciFixBranchPatterns}
+                onChange={(e) => {
+                  setCiFixBranchPatterns(e.target.value);
+                  setDirty(true);
+                  setError("");
+                  setSuccess("");
+                }}
+                placeholder="agent/*, feature/*"
+                className="w-full px-3 py-1.5 text-sm border border-border rounded-sm bg-background text-foreground placeholder:text-muted-foreground"
+              />
+            </div>
+
+            <div className="mb-4">
+              <p className="text-sm font-medium text-foreground mb-2">Allowed CI Fix Actors</p>
+              <div className="grid sm:grid-cols-2 gap-2 mb-3">
+                <RadioCard
+                  name="ci-fix-actors"
+                  checked={ciFixActorMode === "write_access"}
+                  onChange={() => {
+                    setCiFixActorMode("write_access");
+                    setDirty(true);
+                    setError("");
+                    setSuccess("");
+                  }}
+                  label="All users with write access"
+                  description="CI fix triggers for commits by anyone with write permission."
+                />
+                <RadioCard
+                  name="ci-fix-actors"
+                  checked={ciFixActorMode === "specific"}
+                  onChange={() => {
+                    setCiFixActorMode("specific");
+                    setDirty(true);
+                    setError("");
+                    setSuccess("");
+                  }}
+                  label="Only specific users"
+                  description="CI fix only triggers for commits by listed GitHub usernames."
+                />
+              </div>
+
+              {ciFixActorMode === "specific" && (
+                <>
+                  <div className="flex items-center gap-2 mb-2">
+                    <input
+                      type="text"
+                      value={newCiFixActor}
+                      onChange={(e) => setNewCiFixActor(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addCiFixActor();
+                        }
+                      }}
+                      placeholder="GitHub username"
+                      className="flex-1 px-3 py-1.5 text-sm border border-border rounded-sm bg-background text-foreground placeholder:text-muted-foreground"
+                    />
+                    <Button size="sm" onClick={addCiFixActor} disabled={!newCiFixActor.trim()}>
+                      Add
+                    </Button>
+                  </div>
+
+                  {ciFixActors.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {ciFixActors.map((actor) => (
+                        <span
+                          key={actor}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 text-sm bg-muted text-foreground rounded-sm border border-border"
+                        >
+                          {actor}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCiFixActors((prev) => prev.filter((a) => a !== actor));
+                              setDirty(true);
+                              setError("");
+                              setSuccess("");
+                            }}
+                            className="text-muted-foreground hover:text-foreground ml-0.5"
+                            aria-label={`Remove ${actor}`}
+                          >
+                            &times;
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {ciFixActors.length === 0 && (
+                    <p className="text-xs text-amber-700 mt-1">
+                      No actors configured. CI fix will not trigger for any user.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-foreground mb-1">
+                CI Fix Instructions
+              </label>
+              <p className="text-xs text-muted-foreground mb-2">
+                Custom instructions appended to CI fix prompts. Use this to guide the agent on how
+                to investigate and fix CI failures.
+              </p>
+              <textarea
+                value={ciFixInstructions}
+                onChange={(e) => {
+                  setCiFixInstructions(e.target.value);
+                  setDirty(true);
+                  setError("");
+                  setSuccess("");
+                }}
+                rows={3}
+                placeholder="e.g., Always run the full test suite before pushing. Focus on type errors first."
+                className="w-full px-3 py-2 text-sm border border-border rounded-sm bg-background text-foreground placeholder:text-muted-foreground resize-y"
+              />
+            </div>
+          </>
+        )}
       </div>
 
       <div className="flex items-center gap-2">

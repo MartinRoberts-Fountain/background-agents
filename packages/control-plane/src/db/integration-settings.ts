@@ -224,10 +224,45 @@ export class IntegrationSettingsStore {
           "allowedTriggerUsers must be an array of strings"
         );
       }
-      return {
+      settings = {
         ...settings,
         allowedTriggerUsers: settings.allowedTriggerUsers.map((u) => u.trim().toLowerCase()),
       };
+    }
+
+    if (settings.ciFixEnabled !== undefined && typeof settings.ciFixEnabled !== "boolean") {
+      throw new IntegrationSettingsValidationError("ciFixEnabled must be a boolean");
+    }
+
+    if (settings.ciFixBranchPatterns !== undefined) {
+      if (
+        !Array.isArray(settings.ciFixBranchPatterns) ||
+        !settings.ciFixBranchPatterns.every((p) => typeof p === "string")
+      ) {
+        throw new IntegrationSettingsValidationError(
+          "ciFixBranchPatterns must be an array of strings"
+        );
+      }
+    }
+
+    if (settings.ciFixActors !== undefined) {
+      if (
+        !Array.isArray(settings.ciFixActors) ||
+        !settings.ciFixActors.every((a) => typeof a === "string")
+      ) {
+        throw new IntegrationSettingsValidationError("ciFixActors must be an array of strings");
+      }
+      settings = {
+        ...settings,
+        ciFixActors: settings.ciFixActors.map((a) => a.trim().toLowerCase()),
+      };
+    }
+
+    if (
+      settings.ciFixInstructions !== undefined &&
+      typeof settings.ciFixInstructions !== "string"
+    ) {
+      throw new IntegrationSettingsValidationError("ciFixInstructions must be a string");
     }
 
     return settings;

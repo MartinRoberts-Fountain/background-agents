@@ -10,6 +10,10 @@ export interface ResolvedGitHubConfig {
   allowedTriggerUsers: string[] | null;
   codeReviewInstructions: string | null;
   commentActionInstructions: string | null;
+  ciFixEnabled: boolean;
+  ciFixBranchPatterns: string[];
+  ciFixActors: string[] | null;
+  ciFixInstructions: string | null;
 }
 
 const FAIL_CLOSED: Omit<ResolvedGitHubConfig, "model"> = {
@@ -19,6 +23,10 @@ const FAIL_CLOSED: Omit<ResolvedGitHubConfig, "model"> = {
   allowedTriggerUsers: [],
   codeReviewInstructions: null,
   commentActionInstructions: null,
+  ciFixEnabled: false,
+  ciFixBranchPatterns: [],
+  ciFixActors: [],
+  ciFixInstructions: null,
 };
 
 export async function getGitHubConfig(
@@ -62,6 +70,10 @@ export async function getGitHubConfig(
       allowedTriggerUsers: string[] | null;
       codeReviewInstructions: string | null;
       commentActionInstructions: string | null;
+      ciFixEnabled: boolean;
+      ciFixBranchPatterns: string[];
+      ciFixActors: string[] | null;
+      ciFixInstructions: string | null;
     } | null;
   };
 
@@ -74,6 +86,10 @@ export async function getGitHubConfig(
       allowedTriggerUsers: null,
       codeReviewInstructions: null,
       commentActionInstructions: null,
+      ciFixEnabled: false,
+      ciFixBranchPatterns: ["agent/*"],
+      ciFixActors: null,
+      ciFixInstructions: null,
     };
   }
 
@@ -85,5 +101,9 @@ export async function getGitHubConfig(
     allowedTriggerUsers: data.config.allowedTriggerUsers,
     codeReviewInstructions: data.config.codeReviewInstructions,
     commentActionInstructions: data.config.commentActionInstructions,
+    ciFixEnabled: data.config.ciFixEnabled ?? false,
+    ciFixBranchPatterns: data.config.ciFixBranchPatterns ?? ["agent/*"],
+    ciFixActors: data.config.ciFixActors ?? null,
+    ciFixInstructions: data.config.ciFixInstructions ?? null,
   };
 }

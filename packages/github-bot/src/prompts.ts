@@ -90,6 +90,54 @@ ${buildCustomInstructionsSection(codeReviewInstructions)}
 ${buildCommentGuidelines(isPublic)}`;
 }
 
+export function buildCiFixPrompt(params: {
+  owner: string;
+  repo: string;
+  branch: string;
+  sha: string;
+  pullNumber?: number;
+  isPublic: boolean;
+  ciFixInstructions?: string | null;
+}): string {
+  const { owner, repo, branch, sha, pullNumber, isPublic, ciFixInstructions } = params;
+
+  const prSection = pullNumber
+    ? `\n\n## Associated Pull Request
+- **PR #${pullNumber}**: Run \`gh pr view ${pullNumber}\` for details
+- Run \`gh pr diff ${pullNumber}\` to see the changes`
+    : "";
+
+  return `You are working on the repository ${owner}/${repo}.
+The repository has been cloned and you are on the \`${branch}\` branch at commit \`${sha.slice(0, 7)}\`.
+
+## Context
+CI checks have failed on this branch. Your job is to investigate the failures and fix them.
+${prSection}
+
+## Instructions
+1. First, investigate the CI failures:
+
+   gh api repos/${owner}/${repo}/commits/${sha}/check-runs \\
+     --jq '.check_runs[] | select(.conclusion == "failure") | {name, output: .output.summary}'
+
+2. Run the failing checks locally to reproduce the errors (e.g., run tests, linting, type checking)
+3. Read the relevant source files and understand the root cause of each failure
+4. Fix the issues in the code
+5. Run the checks locally again to verify your fixes work
+6. Commit and push your changes to the \`${branch}\` branch${
+    pullNumber
+      ? `
+7. Post a summary comment on the PR:
+
+   gh api repos/${owner}/${repo}/issues/${pullNumber}/comments \\
+     --method POST \\
+     -f body="<summary of CI failures found and fixes applied>"`
+      : ""
+  }
+${buildCustomInstructionsSection(ciFixInstructions)}
+${buildCommentGuidelines(isPublic)}`;
+}
+
 export function buildCommentActionPrompt(params: {
   owner: string;
   repo: string;

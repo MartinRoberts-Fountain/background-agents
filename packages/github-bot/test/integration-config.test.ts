@@ -63,6 +63,10 @@ describe("getGitHubConfig", () => {
       allowedTriggerUsers: null,
       codeReviewInstructions: "Be thorough",
       commentActionInstructions: null,
+      ciFixEnabled: false,
+      ciFixBranchPatterns: ["agent/*"],
+      ciFixActors: null,
+      ciFixInstructions: null,
     });
     expect(log.warn).not.toHaveBeenCalled();
   });
@@ -81,6 +85,10 @@ describe("getGitHubConfig", () => {
       allowedTriggerUsers: [],
       codeReviewInstructions: null,
       commentActionInstructions: null,
+      ciFixEnabled: false,
+      ciFixBranchPatterns: [],
+      ciFixActors: [],
+      ciFixInstructions: null,
     });
     expect(log.warn).toHaveBeenCalledWith(
       "config.fetch_error",
@@ -107,6 +115,10 @@ describe("getGitHubConfig", () => {
       allowedTriggerUsers: [],
       codeReviewInstructions: null,
       commentActionInstructions: null,
+      ciFixEnabled: false,
+      ciFixBranchPatterns: [],
+      ciFixActors: [],
+      ciFixInstructions: null,
     });
     expect(log.warn).toHaveBeenCalledWith(
       "config.fetch_failed",
@@ -131,6 +143,10 @@ describe("getGitHubConfig", () => {
       allowedTriggerUsers: [],
       codeReviewInstructions: null,
       commentActionInstructions: null,
+      ciFixEnabled: false,
+      ciFixBranchPatterns: [],
+      ciFixActors: [],
+      ciFixInstructions: null,
     });
   });
 
@@ -150,6 +166,10 @@ describe("getGitHubConfig", () => {
       allowedTriggerUsers: null,
       codeReviewInstructions: null,
       commentActionInstructions: null,
+      ciFixEnabled: false,
+      ciFixBranchPatterns: ["agent/*"],
+      ciFixActors: null,
+      ciFixInstructions: null,
     });
     expect(log.warn).not.toHaveBeenCalled();
   });

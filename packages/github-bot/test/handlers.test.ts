@@ -5,6 +5,7 @@ import type {
   ReviewRequestedPayload,
   IssueCommentPayload,
   ReviewCommentPayload,
+  CheckSuitePayload,
 } from "../src/types";
 import type { Logger } from "../src/logger";
 import type { ResolvedGitHubConfig } from "../src/utils/integration-config";
@@ -28,6 +29,10 @@ vi.mock("../src/utils/integration-config", () => ({
     allowedTriggerUsers: null,
     codeReviewInstructions: null,
     commentActionInstructions: null,
+    ciFixEnabled: false,
+    ciFixBranchPatterns: ["agent/*"],
+    ciFixActors: null,
+    ciFixInstructions: null,
   }),
 }));
 
@@ -39,6 +44,10 @@ const defaultConfig: ResolvedGitHubConfig = {
   allowedTriggerUsers: null,
   codeReviewInstructions: null,
   commentActionInstructions: null,
+  ciFixEnabled: false,
+  ciFixBranchPatterns: ["agent/*"],
+  ciFixActors: null,
+  ciFixInstructions: null,
 };
 
 import {
@@ -46,6 +55,8 @@ import {
   handleReviewRequested,
   handleIssueComment,
   handleReviewComment,
+  handleCheckSuiteCompleted,
+  matchesBranchPattern,
 } from "../src/handlers";
 import { generateInstallationToken, postReaction, checkSenderPermission } from "../src/github-auth";
 import { getGitHubConfig } from "../src/utils/integration-config";
@@ -888,5 +899,288 @@ describe("integration config", () => {
     const cpFetch = getControlPlaneFetch(env);
     const promptBody = JSON.parse(cpFetch.mock.calls[1][1].body);
     expect(promptBody.content).not.toContain("## Custom Instructions");
+  });
+});
+
+const checkSuitePayload: CheckSuitePayload = {
+  action: "completed",
+  check_suite: {
+    id: 999,
+    head_branch: "agent/fix-tests",
+    head_sha: "def456abc",
+    status: "completed",
+    conclusion: "failure",
+    app: { slug: "github-actions" },
+    pull_requests: [
+      {
+        number: 55,
+        head: { ref: "agent/fix-tests", sha: "def456abc" },
+        base: { ref: "main" },
+      },
+    ],
+  },
+  repository: { owner: { login: "acme" }, name: "widgets", private: false },
+  sender: { login: "alice" },
+};
+
+describe("matchesBranchPattern", () => {
+  it("matches simple glob with *", () => {
+    expect(matchesBranchPattern("agent/fix-tests", "agent/*")).toBe(true);
+    expect(matchesBranchPattern("feature/foo", "agent/*")).toBe(false);
+  });
+
+  it("matches exact branch name", () => {
+    expect(matchesBranchPattern("main", "main")).toBe(true);
+    expect(matchesBranchPattern("main", "develop")).toBe(false);
+  });
+
+  it("matches ** for nested paths", () => {
+    expect(matchesBranchPattern("agent/team/fix", "agent/**")).toBe(true);
+    expect(matchesBranchPattern("agent/fix", "agent/**")).toBe(true);
+  });
+
+  it("* does not match nested paths", () => {
+    expect(matchesBranchPattern("agent/team/fix", "agent/*")).toBe(false);
+  });
+
+  it("matches multiple patterns via handler", () => {
+    expect(matchesBranchPattern("feature/new", "feature/*")).toBe(true);
+    expect(matchesBranchPattern("hotfix/urgent", "hotfix/*")).toBe(true);
+  });
+});
+
+describe("handleCheckSuiteCompleted", () => {
+  it("creates EC2 session when CI fails on matching branch with ciFixEnabled", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      ciFixBranchPatterns: ["agent/*"],
+      ciFixActors: null,
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    const result = await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-0");
+
+    expect(result).toEqual({
+      outcome: "processed",
+      session_id: "session-123",
+      message_id: "msg-456",
+      handler_action: "ci_fix",
+    });
+
+    const cpFetch = getControlPlaneFetch(env);
+    expect(cpFetch).toHaveBeenCalledTimes(2);
+
+    const sessionBody = JSON.parse(cpFetch.mock.calls[0][1].body);
+    expect(sessionBody.repoOwner).toBe("acme");
+    expect(sessionBody.repoName).toBe("widgets");
+    expect(sessionBody.sandboxProvider).toBe("ec2");
+    expect(sessionBody.mode).toBe("apply");
+    expect(sessionBody.title).toContain("CI fix");
+    expect(sessionBody.title).toContain("agent/fix-tests");
+
+    const promptBody = JSON.parse(cpFetch.mock.calls[1][1].body);
+    expect(promptBody.content).toContain("CI checks have failed");
+    expect(promptBody.content).toContain("def456a");
+    expect(promptBody.content).toContain("agent/fix-tests");
+    expect(promptBody.authorId).toBe("github:alice");
+  });
+
+  it("skips when conclusion is not failure", async () => {
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: CheckSuitePayload = {
+      ...checkSuitePayload,
+      check_suite: { ...checkSuitePayload.check_suite, conclusion: "success" },
+    };
+
+    const result = await handleCheckSuiteCompleted(env, log, payload, "trace-ci-1");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "ci_not_failure" });
+    expect(getControlPlaneFetch(env)).not.toHaveBeenCalled();
+  });
+
+  it("skips when ciFixEnabled is false (default)", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({ ...defaultConfig });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    const result = await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-2");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "ci_fix_disabled" });
+    expect(getControlPlaneFetch(env)).not.toHaveBeenCalled();
+  });
+
+  it("skips when branch does not match patterns", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      ciFixBranchPatterns: ["feature/*"],
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    const result = await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-3");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "ci_branch_not_matched" });
+    expect(getControlPlaneFetch(env)).not.toHaveBeenCalled();
+  });
+
+  it("skips when sender is the bot (loop prevention)", async () => {
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: CheckSuitePayload = {
+      ...checkSuitePayload,
+      sender: { login: "test-bot[bot]" },
+    };
+
+    const result = await handleCheckSuiteCompleted(env, log, payload, "trace-ci-4");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "self_check" });
+    expect(getControlPlaneFetch(env)).not.toHaveBeenCalled();
+  });
+
+  it("skips when sender not in ciFixActors", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      ciFixBranchPatterns: ["agent/*"],
+      ciFixActors: ["bob"],
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    const result = await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-5");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "ci_actor_not_allowed" });
+    expect(getControlPlaneFetch(env)).not.toHaveBeenCalled();
+  });
+
+  it("allows sender in ciFixActors (case-insensitive)", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      ciFixBranchPatterns: ["agent/*"],
+      ciFixActors: ["Alice"],
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    const result = await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-6");
+
+    expect(result.outcome).toBe("processed");
+    expect(getControlPlaneFetch(env)).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips when repo not in enabledRepos", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      enabledRepos: ["other/repo"],
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    const result = await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-7");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "repo_not_enabled" });
+    expect(getControlPlaneFetch(env)).not.toHaveBeenCalled();
+  });
+
+  it("skips when head_branch is null", async () => {
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: CheckSuitePayload = {
+      ...checkSuitePayload,
+      check_suite: { ...checkSuitePayload.check_suite, head_branch: null },
+    };
+
+    const result = await handleCheckSuiteCompleted(env, log, payload, "trace-ci-8");
+
+    expect(result).toEqual({ outcome: "skipped", skip_reason: "ci_no_branch" });
+  });
+
+  it("includes PR number in session title and prompt when available", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      ciFixBranchPatterns: ["agent/*"],
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-9");
+
+    const cpFetch = getControlPlaneFetch(env);
+    const sessionBody = JSON.parse(cpFetch.mock.calls[0][1].body);
+    expect(sessionBody.title).toContain("PR #55");
+
+    const promptBody = JSON.parse(cpFetch.mock.calls[1][1].body);
+    expect(promptBody.content).toContain("PR #55");
+  });
+
+  it("handles check suite with no pull requests", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      ciFixBranchPatterns: ["agent/*"],
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+    const payload: CheckSuitePayload = {
+      ...checkSuitePayload,
+      check_suite: { ...checkSuitePayload.check_suite, pull_requests: [] },
+    };
+
+    const result = await handleCheckSuiteCompleted(env, log, payload, "trace-ci-10");
+
+    expect(result.outcome).toBe("processed");
+    const cpFetch = getControlPlaneFetch(env);
+    const sessionBody = JSON.parse(cpFetch.mock.calls[0][1].body);
+    expect(sessionBody.title).not.toContain("PR #");
+  });
+
+  it("passes ciFixInstructions into the prompt", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      ciFixBranchPatterns: ["agent/*"],
+      ciFixInstructions: "Always run lint first.",
+    });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-11");
+
+    const cpFetch = getControlPlaneFetch(env);
+    const promptBody = JSON.parse(cpFetch.mock.calls[1][1].body);
+    expect(promptBody.content).toContain("## Custom Instructions");
+    expect(promptBody.content).toContain("Always run lint first.");
+  });
+
+  it("checks write permission when ciFixActors is null", async () => {
+    vi.mocked(getGitHubConfig).mockResolvedValue({
+      ...defaultConfig,
+      ciFixEnabled: true,
+      ciFixBranchPatterns: ["agent/*"],
+      ciFixActors: null,
+    });
+    vi.mocked(checkSenderPermission).mockResolvedValue({ hasPermission: false });
+    const env = createMockEnv();
+    const log = createMockLogger();
+
+    const result = await handleCheckSuiteCompleted(env, log, checkSuitePayload, "trace-ci-12");
+
+    expect(result).toEqual({
+      outcome: "skipped",
+      skip_reason: "ci_actor_insufficient_permission",
+    });
+    expect(checkSenderPermission).toHaveBeenCalledWith(
+      "test-installation-token",
+      "acme",
+      "widgets",
+      "alice"
+    );
   });
 });

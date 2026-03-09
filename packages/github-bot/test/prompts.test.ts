@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildCodeReviewPrompt, buildCommentActionPrompt } from "../src/prompts";
+import { buildCodeReviewPrompt, buildCommentActionPrompt, buildCiFixPrompt } from "../src/prompts";
 
 describe("buildCodeReviewPrompt", () => {
   const baseParams = {
@@ -229,5 +229,62 @@ describe("buildCommentActionPrompt", () => {
     expect(customIdx).toBeGreaterThan(-1);
     expect(guidelinesIdx).toBeGreaterThan(-1);
     expect(customIdx).toBeLessThan(guidelinesIdx);
+  });
+});
+
+describe("buildCiFixPrompt", () => {
+  const baseParams = {
+    owner: "acme",
+    repo: "widgets",
+    branch: "agent/fix-tests",
+    sha: "def456abc789",
+    isPublic: false,
+  };
+
+  it("includes branch, sha, and CI fix instructions", () => {
+    const prompt = buildCiFixPrompt(baseParams);
+    expect(prompt).toContain("agent/fix-tests");
+    expect(prompt).toContain("def456a");
+    expect(prompt).toContain("CI checks have failed");
+    expect(prompt).toContain("acme/widgets");
+    expect(prompt).toContain("check-runs");
+  });
+
+  it("includes PR section when pullNumber provided", () => {
+    const prompt = buildCiFixPrompt({ ...baseParams, pullNumber: 55 });
+    expect(prompt).toContain("PR #55");
+    expect(prompt).toContain("gh pr view 55");
+    expect(prompt).toContain("gh pr diff 55");
+    expect(prompt).toContain("issues/55/comments");
+  });
+
+  it("omits PR section when pullNumber not provided", () => {
+    const prompt = buildCiFixPrompt(baseParams);
+    expect(prompt).not.toContain("Associated Pull Request");
+    expect(prompt).not.toContain("gh pr view");
+  });
+
+  it("includes custom instructions when provided", () => {
+    const prompt = buildCiFixPrompt({
+      ...baseParams,
+      ciFixInstructions: "Run lint before tests.",
+    });
+    expect(prompt).toContain("## Custom Instructions");
+    expect(prompt).toContain("Run lint before tests.");
+  });
+
+  it("omits custom instructions when null", () => {
+    const prompt = buildCiFixPrompt({ ...baseParams, ciFixInstructions: null });
+    expect(prompt).not.toContain("## Custom Instructions");
+  });
+
+  it("includes private repo comment guidelines", () => {
+    const prompt = buildCiFixPrompt({ ...baseParams, isPublic: false });
+    expect(prompt).toContain("private repository");
+  });
+
+  it("includes public repo comment guidelines", () => {
+    const prompt = buildCiFixPrompt({ ...baseParams, isPublic: true });
+    expect(prompt).toContain("PUBLIC repository");
   });
 });

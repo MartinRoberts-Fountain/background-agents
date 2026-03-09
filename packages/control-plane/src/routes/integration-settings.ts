@@ -310,6 +310,10 @@ async function handleGetResolvedConfig(
         allowedTriggerUsers: githubSettings.allowedTriggerUsers ?? null,
         codeReviewInstructions: githubSettings.codeReviewInstructions ?? null,
         commentActionInstructions: githubSettings.commentActionInstructions ?? null,
+        ciFixEnabled: githubSettings.ciFixEnabled ?? false,
+        ciFixBranchPatterns: githubSettings.ciFixBranchPatterns ?? ["agent/*"],
+        ciFixActors: githubSettings.ciFixActors ?? null,
+        ciFixInstructions: githubSettings.ciFixInstructions ?? null,
       },
     });
   }

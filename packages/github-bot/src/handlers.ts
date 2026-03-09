@@ -4,10 +4,11 @@ import type {
   ReviewRequestedPayload,
   IssueCommentPayload,
   ReviewCommentPayload,
+  CheckSuitePayload,
 } from "./types";
 import type { Logger } from "./logger";
 import { generateInstallationToken, postReaction, checkSenderPermission } from "./github-auth";
-import { buildCodeReviewPrompt, buildCommentActionPrompt } from "./prompts";
+import { buildCodeReviewPrompt, buildCommentActionPrompt, buildCiFixPrompt } from "./prompts";
 import { generateInternalToken } from "./utils/internal";
 import { getGitHubConfig, type ResolvedGitHubConfig } from "./utils/integration-config";
 
@@ -33,6 +34,8 @@ async function createSession(
     title: string;
     model: string;
     reasoningEffort?: string | null;
+    sandboxProvider?: string | null;
+    mode?: string | null;
   }
 ): Promise<string> {
   const body: Record<string, unknown> = {
@@ -43,6 +46,12 @@ async function createSession(
   };
   if (params.reasoningEffort) {
     body.reasoningEffort = params.reasoningEffort;
+  }
+  if (params.sandboxProvider) {
+    body.sandboxProvider = params.sandboxProvider;
+  }
+  if (params.mode) {
+    body.mode = params.mode;
   }
   const response = await controlPlane.fetch("https://internal/sessions", {
     method: "POST",
@@ -535,5 +544,160 @@ export async function handleReviewComment(
     session_id: sessionId,
     message_id: messageId,
     handler_action: "review_comment",
+  };
+}
+
+/**
+ * Simple glob matching for branch patterns.
+ * Supports `*` (match any characters except `/`) and `**` (match anything including `/`).
+ */
+export function matchesBranchPattern(branch: string, pattern: string): boolean {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, "<<GLOBSTAR>>")
+    .replace(/\*/g, "[^/]*")
+    .replace(/<<GLOBSTAR>>/g, ".*");
+  return new RegExp(`^${escaped}$`).test(branch);
+}
+
+export async function handleCheckSuiteCompleted(
+  env: Env,
+  log: Logger,
+  payload: CheckSuitePayload,
+  traceId: string
+): Promise<HandlerResult> {
+  const { check_suite: suite, repository: repo, sender } = payload;
+  const owner = repo.owner.login;
+  const repoName = repo.name;
+  const repoFullName = `${owner}/${repoName}`.toLowerCase();
+  const branch = suite.head_branch;
+
+  if (suite.conclusion !== "failure") {
+    log.debug("handler.ci_not_failure", {
+      trace_id: traceId,
+      conclusion: suite.conclusion,
+    });
+    return { outcome: "skipped", skip_reason: "ci_not_failure" };
+  }
+
+  if (!branch) {
+    log.debug("handler.ci_no_branch", { trace_id: traceId });
+    return { outcome: "skipped", skip_reason: "ci_no_branch" };
+  }
+
+  if (sender.login === env.GITHUB_BOT_USERNAME) {
+    log.debug("handler.self_check_ignored", { trace_id: traceId });
+    return { outcome: "skipped", skip_reason: "self_check" };
+  }
+
+  const config = await getGitHubConfig(env, repoFullName, log);
+
+  if (config.enabledRepos !== null && !config.enabledRepos.includes(repoFullName)) {
+    log.debug("handler.repo_not_enabled", { trace_id: traceId, repo: repoFullName });
+    return { outcome: "skipped", skip_reason: "repo_not_enabled" };
+  }
+
+  if (!config.ciFixEnabled) {
+    log.debug("handler.ci_fix_disabled", { trace_id: traceId, repo: repoFullName });
+    return { outcome: "skipped", skip_reason: "ci_fix_disabled" };
+  }
+
+  const branchMatches = config.ciFixBranchPatterns.some((pattern) =>
+    matchesBranchPattern(branch, pattern)
+  );
+  if (!branchMatches) {
+    log.debug("handler.ci_branch_not_matched", {
+      trace_id: traceId,
+      branch,
+      patterns: config.ciFixBranchPatterns,
+    });
+    return { outcome: "skipped", skip_reason: "ci_branch_not_matched" };
+  }
+
+  if (config.ciFixActors !== null) {
+    if (!config.ciFixActors.some((a) => a.toLowerCase() === sender.login.toLowerCase())) {
+      log.info("handler.ci_actor_not_allowed", {
+        trace_id: traceId,
+        sender: sender.login,
+      });
+      return { outcome: "skipped", skip_reason: "ci_actor_not_allowed" };
+    }
+  } else {
+    const [ghToken] = await Promise.all([
+      generateInstallationToken({
+        appId: env.GITHUB_APP_ID,
+        privateKey: env.GITHUB_APP_PRIVATE_KEY,
+        installationId: env.GITHUB_APP_INSTALLATION_ID,
+      }),
+    ]);
+    const { hasPermission, error } = await checkSenderPermission(
+      ghToken,
+      owner,
+      repoName,
+      sender.login
+    );
+    if (!hasPermission) {
+      const reason = error ? "permission_check_failed" : "ci_actor_insufficient_permission";
+      log.info(
+        error ? "handler.permission_check_failed" : "handler.ci_actor_insufficient_permission",
+        {
+          trace_id: traceId,
+          sender: sender.login,
+          repo: repoFullName,
+        }
+      );
+      return { outcome: "skipped", skip_reason: reason };
+    }
+  }
+
+  const headers = await getAuthHeaders(env, traceId);
+  const pullNumber = suite.pull_requests?.[0]?.number;
+
+  const meta = {
+    trace_id: traceId,
+    repo: repoFullName,
+    branch,
+    sha: suite.head_sha,
+    pull_number: pullNumber,
+  };
+
+  const sessionId = await createSession(env.CONTROL_PLANE, headers, {
+    repoOwner: owner,
+    repoName,
+    title: `GitHub: CI fix on ${branch}${pullNumber ? ` (PR #${pullNumber})` : ""}`,
+    model: config.model,
+    reasoningEffort: config.reasoningEffort,
+    sandboxProvider: "ec2",
+    mode: "apply",
+  });
+  log.info("session.created", { ...meta, session_id: sessionId, action: "ci_fix" });
+
+  const prompt = buildCiFixPrompt({
+    owner,
+    repo: repoName,
+    branch,
+    sha: suite.head_sha,
+    pullNumber,
+    isPublic: !repo.private,
+    ciFixInstructions: config.ciFixInstructions,
+  });
+
+  const messageId = await sendPrompt(env.CONTROL_PLANE, headers, sessionId, {
+    content: prompt,
+    authorId: `github:${sender.login}`,
+  });
+  log.info("prompt.sent", {
+    ...meta,
+    session_id: sessionId,
+    message_id: messageId,
+    source: "github",
+    content_length: prompt.length,
+  });
+
+  return {
+    outcome: "processed",
+    session_id: sessionId,
+    message_id: messageId,
+    handler_action: "ci_fix",
   };
 }

@@ -19,6 +19,14 @@ export interface GitHubBotSettings {
   allowedTriggerUsers?: string[];
   codeReviewInstructions?: string;
   commentActionInstructions?: string;
+  /** Enable auto-fix sessions when CI checks fail on matching branches. */
+  ciFixEnabled?: boolean;
+  /** Branch name patterns that qualify for CI fix (glob-style). Defaults to ["agent/*"]. */
+  ciFixBranchPatterns?: string[];
+  /** GitHub actor logins allowed to trigger CI fix. Null means all actors with write access. */
+  ciFixActors?: string[];
+  /** Custom instructions appended to CI fix prompts. */
+  ciFixInstructions?: string;
 }
 
 /** Overridable behavior settings for the Linear bot. Used at both global (defaults) and per-repo (overrides) levels. */
