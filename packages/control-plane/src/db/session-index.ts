@@ -14,7 +14,7 @@ export interface SessionEntry {
   spawnDepth?: number;
   automationId?: string | null;
   automationRunId?: string | null;
-  mode?: "plan" | "apply" | null;
+  mode?: string | null;
   sandboxProvider?: "modal" | "helm" | "ec2" | null;
   createdAt: number;
   updatedAt: number;
@@ -34,7 +34,7 @@ interface SessionRow {
   spawn_depth: number;
   automation_id: string | null;
   automation_run_id: string | null;
-  mode: "plan" | "apply" | null;
+  mode: string | null;
   sandbox_provider: "modal" | "helm" | "ec2" | null;
   created_at: number;
   updated_at: number;

@@ -1,4 +1,4 @@
-import type { SpawnContext } from "@open-inspect/shared";
+import type { SpawnContext, SessionMode } from "@open-inspect/shared";
 import type { SessionStatus } from "../../../types";
 import type { SessionRepository } from "../../repository";
 import type { SandboxRow, SessionRow } from "../../types";
@@ -42,7 +42,7 @@ export function createChildSessionsHandler(deps: ChildSessionsHandlerDeps): Chil
         repoId: session.repo_id,
         model: session.model,
         reasoningEffort: session.reasoning_effort ?? null,
-        mode: session.mode ?? null,
+        mode: (session.mode as SessionMode) ?? null,
         sandboxProvider: (session.sandbox_provider ?? null) as "modal" | "helm" | "ec2" | null,
         baseBranch: session.base_branch,
         owner: {

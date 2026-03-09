@@ -41,6 +41,7 @@ import { reposRoutes } from "./routes/repos";
 import { repoImageRoutes } from "./routes/repo-images";
 import { secretsRoutes } from "./routes/secrets";
 import { automationRoutes } from "./routes/automations";
+import { modeTemplateRoutes } from "./routes/mode-templates";
 
 const logger = createLogger("router");
 
@@ -443,6 +444,9 @@ const routes: Route[] = [
 
   // Repo image builds
   ...repoImageRoutes,
+
+  // Mode templates
+  ...modeTemplateRoutes,
 
   // Automations
   ...automationRoutes,
