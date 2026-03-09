@@ -200,7 +200,19 @@ app.post("/webhook", async (c) => {
       return c.json({ error: "Invalid payload" }, 400);
     }
 
-    c.executionCtx.waitUntil(handleAgentSessionEvent(payload, c.env, traceId));
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          await handleAgentSessionEvent(payload, c.env, traceId);
+        } catch (e) {
+          log.error("webhook.agent_session_failed", {
+            trace_id: traceId,
+            agent_session_id: payload.agentSession.id,
+            error: e instanceof Error ? e : new Error(String(e)),
+          });
+        }
+      })()
+    );
 
     log.info("http.request", {
       trace_id: traceId,
@@ -233,7 +245,19 @@ app.post("/webhook", async (c) => {
       return c.json({ ok: true, skipped: true, reason: "duplicate" });
     }
 
-    c.executionCtx.waitUntil(handleIssueStatusChange(payload, c.env, traceId));
+    c.executionCtx.waitUntil(
+      (async () => {
+        try {
+          await handleIssueStatusChange(payload, c.env, traceId);
+        } catch (e) {
+          log.error("webhook.issue_status_change_failed", {
+            trace_id: traceId,
+            issue_id: payload.data.id,
+            error: e instanceof Error ? e : new Error(String(e)),
+          });
+        }
+      })()
+    );
 
     log.info("http.request", {
       trace_id: traceId,

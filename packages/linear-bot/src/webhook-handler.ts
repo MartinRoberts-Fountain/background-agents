@@ -17,6 +17,7 @@ import {
   fetchIssueDetails,
   updateAgentSession,
   getRepoSuggestions,
+  postIssueComment,
 } from "./utils/linear-client";
 import { generateInternalToken } from "./utils/internal";
 import { classifyRepo } from "./classifier";
@@ -138,6 +139,14 @@ async function handleFollowUp(
       org_id: orgId,
       agent_session_id: agentSessionId,
     });
+
+    if (env.LINEAR_API_KEY) {
+      await postIssueComment(
+        env.LINEAR_API_KEY,
+        issue.id,
+        `⚠️ **Open-Inspect Error**: Failed to initialize Linear client (missing OAuth token for workspace). Please reinstall the integration.\n\n*Trace ID: ${traceId}*`
+      );
+    }
     return;
   }
 
@@ -223,12 +232,20 @@ async function handleFollowUp(
         : `Follow-up sent to existing session.\n\n[View session](${env.WEB_APP_URL}/session/${existingSession.sessionId})`,
     });
   } else {
-    await emitAgentActivity(client, agentSessionId, {
-      type: "error",
-      body: isPlanMode
-        ? "Failed to send plan revision to the existing session."
-        : "Failed to send follow-up to the existing session.",
-    });
+    const errorBody = isPlanMode
+      ? `Failed to send plan revision to the existing session.\n\n\`HTTP ${promptRes.status}\`\n\n*Trace ID: ${traceId}*`
+      : `Failed to send follow-up to the existing session.\n\n\`HTTP ${promptRes.status}\`\n\n*Trace ID: ${traceId}*`;
+
+    try {
+      await emitAgentActivity(client, agentSessionId, {
+        type: "error",
+        body: errorBody,
+      });
+    } catch {
+      if (env.LINEAR_API_KEY) {
+        await postIssueComment(env.LINEAR_API_KEY, issue.id, `⚠️ **Open-Inspect Error**: ${errorBody}`);
+      }
+    }
   }
 
   log.info("agent_session.followup", {
@@ -261,6 +278,14 @@ async function handleNewSession(
       org_id: orgId,
       agent_session_id: agentSessionId,
     });
+
+    if (env.LINEAR_API_KEY) {
+      await postIssueComment(
+        env.LINEAR_API_KEY,
+        issue.id,
+        `⚠️ **Open-Inspect Error**: Failed to initialize Linear client for follow-up (missing OAuth token). Please reinstall the integration.\n\n*Trace ID: ${traceId}*`
+      );
+    }
     return;
   }
 
@@ -482,10 +507,17 @@ async function handleNewSession(
     } catch {
       /* ignore */
     }
-    await emitAgentActivity(client, agentSessionId, {
-      type: "error",
-      body: `Failed to create a coding session.\n\n\`HTTP ${sessionRes.status}: ${sessionErrBody.slice(0, 200)}\``,
-    });
+    const errorBody = `Failed to create a coding session.\n\n\`HTTP ${sessionRes.status}: ${sessionErrBody.slice(0, 200)}\`\n\n*Trace ID: ${traceId}*`;
+    try {
+      await emitAgentActivity(client, agentSessionId, {
+        type: "error",
+        body: errorBody,
+      });
+    } catch {
+      if (env.LINEAR_API_KEY) {
+        await postIssueComment(env.LINEAR_API_KEY, issue.id, `⚠️ **Open-Inspect Error**: ${errorBody}`);
+      }
+    }
     log.error("control_plane.create_session", {
       trace_id: traceId,
       issue_identifier: issue.identifier,
@@ -563,10 +595,17 @@ async function handleNewSession(
     } catch {
       /* ignore */
     }
-    await emitAgentActivity(client, agentSessionId, {
-      type: "error",
-      body: `Failed to send the prompt to the coding session.\n\n\`HTTP ${promptRes.status}: ${promptErrBody.slice(0, 200)}\``,
-    });
+    const errorBody = `Failed to send the prompt to the coding session.\n\n\`HTTP ${promptRes.status}: ${promptErrBody.slice(0, 200)}\`\n\n*Trace ID: ${traceId}*`;
+    try {
+      await emitAgentActivity(client, agentSessionId, {
+        type: "error",
+        body: errorBody,
+      });
+    } catch {
+      if (env.LINEAR_API_KEY) {
+        await postIssueComment(env.LINEAR_API_KEY, issue.id, `⚠️ **Open-Inspect Error**: ${errorBody}`);
+      }
+    }
     log.error("control_plane.send_prompt", {
       trace_id: traceId,
       session_id: session.sessionId,
@@ -649,6 +688,14 @@ export async function handleIssueStatusChange(
       org_id: orgId,
       issue_id: issueData.id,
     });
+
+    if (env.LINEAR_API_KEY) {
+      await postIssueComment(
+        env.LINEAR_API_KEY,
+        issueData.id,
+        `⚠️ **Open-Inspect Error**: Failed to initialize Linear client for status change trigger (missing OAuth token). Please reinstall the integration.\n\n*Trace ID: ${traceId}*`
+      );
+    }
     return;
   }
 
