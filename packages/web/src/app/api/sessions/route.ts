@@ -63,6 +63,7 @@ export async function POST(request: NextRequest) {
       title: body.title,
       agent: body.agent,
       sandboxProvider: body.sandboxProvider,
+      mode: body.mode,
       scmToken: accessToken,
       userId,
       scmLogin: user.login,

@@ -402,7 +402,7 @@ describe("Issue Status Change → Apply Trigger", () => {
     expect(env.CONTROL_PLANE.fetch).toHaveBeenCalledWith(
       "https://internal/sessions/sess-apply-1/prompt",
       expect.objectContaining({
-        body: expect.stringContaining("APPLY mode"),
+        body: expect.stringContaining("ENG-1"),
       })
     );
 
