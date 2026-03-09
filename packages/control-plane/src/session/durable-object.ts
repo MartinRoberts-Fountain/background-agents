@@ -29,6 +29,7 @@ import {
   type RepoImageLookup,
 } from "../sandbox/lifecycle/manager";
 import { RepoImageStore } from "../db/repo-images";
+import { Ec2ConfigStore } from "../db/ec2-config";
 import { SessionIndexStore } from "../db/session-index";
 import {
   evaluateExecutionTimeout,
@@ -642,14 +643,38 @@ export class SessionDO extends DurableObject<Env> {
       },
     };
 
-    // Create repo image lookup if D1 is available
+    // Create repo image lookup if D1 is available.
+    // For EC2 provider: return the global AMI shared across all repos.
+    // For other providers: return the per-repo image (Modal snapshot).
     let repoImageLookup: RepoImageLookup | undefined;
     if (this.env.DB) {
-      const repoImageStore = new RepoImageStore(this.env.DB);
-      repoImageLookup = {
-        getLatestReady: (repoOwner, repoName, baseBranch) =>
-          repoImageStore.getLatestReady(repoOwner, repoName, baseBranch),
-      };
+      if (sandboxProvider === "ec2") {
+        const ec2ConfigStore = new Ec2ConfigStore(this.env.DB);
+        repoImageLookup = {
+          getLatestReady: async () => {
+            const config = await ec2ConfigStore.getConfig();
+            if (!config?.currentAmiId) return null;
+            return {
+              id: "ec2-global",
+              repo_owner: "",
+              repo_name: "",
+              provider_image_id: config.currentAmiId,
+              base_sha: "",
+              base_branch: "main",
+              status: "ready" as const,
+              build_duration_seconds: null,
+              error_message: null,
+              created_at: config.lastBuiltAt ?? 0,
+            };
+          },
+        };
+      } else {
+        const repoImageStore = new RepoImageStore(this.env.DB);
+        repoImageLookup = {
+          getLatestReady: (repoOwner, repoName, baseBranch) =>
+            repoImageStore.getLatestReady(repoOwner, repoName, baseBranch),
+        };
+      }
     }
 
     return new SandboxLifecycleManager(

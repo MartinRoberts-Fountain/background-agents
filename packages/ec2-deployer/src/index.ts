@@ -77,6 +77,8 @@ export interface Env {
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_API_TOKEN: string;
   CLOUDFLARE_TUNNEL_SECRET: string;
+  /** Control plane base URL for fetching EC2 config and sending build callbacks. */
+  CONTROL_PLANE_URL?: string;
 }
 
 /**
@@ -135,6 +137,90 @@ async function cleanupOldResources(env: Env): Promise<void> {
     const { total_count, page: currentPage, per_page } = data.result_info;
     hasMore = currentPage * per_page < total_count;
     page++;
+  }
+}
+
+/** Rebuild interval: 7 days in milliseconds. */
+const REBUILD_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Trigger a new EC2 image build if the setup script is configured and the
+ * last build is older than REBUILD_INTERVAL_MS (or no image exists yet).
+ * Called from the weekly cron handler.
+ */
+async function maybeRebuildImage(env: Env): Promise<void> {
+  if (!env.CONTROL_PLANE_URL) {
+    console.log("CONTROL_PLANE_URL not set, skipping EC2 image rebuild check");
+    return;
+  }
+
+  let config: {
+    setupScript: string | null;
+    currentAmiId: string | null;
+    status: string;
+    lastBuiltAt: number | null;
+  };
+
+  try {
+    const res = await fetch(`${env.CONTROL_PLANE_URL}/ec2/config`);
+    if (!res.ok) {
+      console.error(`Failed to fetch EC2 config: ${res.status}`);
+      return;
+    }
+    config = (await res.json()) as typeof config;
+  } catch (e) {
+    console.error(`Error fetching EC2 config: ${e}`);
+    return;
+  }
+
+  if (!config.setupScript) {
+    console.log("No EC2 setup script configured, skipping rebuild");
+    return;
+  }
+
+  if (config.status === "building") {
+    console.log("EC2 image build already in progress, skipping");
+    return;
+  }
+
+  const now = Date.now();
+  const lastBuilt = config.lastBuiltAt ?? 0;
+  if (config.currentAmiId && now - lastBuilt < REBUILD_INTERVAL_MS) {
+    console.log(
+      `EC2 image built ${Math.round((now - lastBuilt) / 86400000)}d ago, next rebuild in ` +
+        `${Math.round((REBUILD_INTERVAL_MS - (now - lastBuilt)) / 86400000)}d`
+    );
+    return;
+  }
+
+  console.log("Triggering weekly EC2 image rebuild");
+
+  const buildId = `ec2-img-cron-${now}`;
+  const callbackUrl = `${env.CONTROL_PLANE_URL}/ec2/build-complete`;
+
+  try {
+    // Notify control plane that a build is starting
+    await fetch(`${env.CONTROL_PLANE_URL}/ec2/trigger`, { method: "POST" });
+    // The trigger endpoint creates the buildId and calls us back via /build-image.
+    // But to avoid the double-hop, create the DO directly.
+    const id = env.EC2_IMAGE_BUILD.idFromName(buildId);
+    const stub = env.EC2_IMAGE_BUILD.get(id);
+    // Fire-and-forget: the DO manages its own lifecycle and callbacks
+    stub
+      .fetch("https://worker.local/build-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          buildId,
+          setupScript: config.setupScript,
+          callbackUrl,
+        }),
+      })
+      .catch((e) => console.error(`EC2 image build DO error: ${e}`));
+
+    console.log(`EC2 image rebuild started: ${buildId}`);
+  } catch (e) {
+    console.error(`Failed to start EC2 image rebuild: ${e}`);
   }
 }
 
@@ -199,7 +285,7 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await cleanupOldResources(env);
+    await Promise.all([cleanupOldResources(env), maybeRebuildImage(env)]);
   },
 };
 
@@ -574,27 +660,28 @@ function parseAwsXml(xml: string): AwsXmlResult {
   return res;
 }
 
-/** Maximum time to wait for setup script to complete (instance to stop). */
-const IMAGE_BUILD_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+/** Poll interval for checking EC2 instance and AMI state. */
+const IMAGE_BUILD_POLL_INTERVAL_MS = 30_000; // 30 seconds
 
-/** Maximum time to wait for AMI creation to complete. */
-const AMI_CREATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+/** Maximum time to wait for setup script to complete (instance to stop). */
+const IMAGE_BUILD_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 
 /**
  * EC2 Image Build Durable Object
  *
- * Manages the lifecycle of an EC2 image build:
+ * Manages the lifecycle of an EC2 image build using DO alarms for polling:
  * 1. Launch base AMI with setup script as UserData (script shuts down on completion)
- * 2. Poll for instance state = "stopped"
+ * 2. Set alarm to poll DescribeInstanceStatus until instance is "stopped"
  * 3. Create AMI from the stopped instance
- * 4. Poll for AMI state = "available"
- * 5. Terminate instance
- * 6. Callback to control plane with new AMI ID
+ * 4. Set alarm to poll DescribeImages until AMI is "available"
+ * 5. Terminate instance, callback to control plane with new AMI ID
  */
 export class EC2ImageBuildDO extends DurableObject<Env> {
   private instanceId: string | null = null;
   private buildId: string | null = null;
   private callbackUrl: string | null = null;
+  private pendingAmiId: string | null = null;
+  private startedAtMs: number = 0;
   private status: string = "pending";
   private aws: AwsClient;
 
@@ -610,6 +697,8 @@ export class EC2ImageBuildDO extends DurableObject<Env> {
       this.instanceId = (await this.ctx.storage.get<string>("instanceId")) || null;
       this.buildId = (await this.ctx.storage.get<string>("buildId")) || null;
       this.callbackUrl = (await this.ctx.storage.get<string>("callbackUrl")) || null;
+      this.pendingAmiId = (await this.ctx.storage.get<string>("pendingAmiId")) || null;
+      this.startedAtMs = (await this.ctx.storage.get<number>("startedAtMs")) || 0;
       this.status = (await this.ctx.storage.get<string>("status")) || "pending";
     });
   }
@@ -636,16 +725,10 @@ export class EC2ImageBuildDO extends DurableObject<Env> {
     const body = (await request.json()) as BuildImageBody;
     this.buildId = body.buildId;
     this.callbackUrl = body.callbackUrl;
-    await this.ctx.storage.put("buildId", this.buildId);
-    await this.ctx.storage.put("callbackUrl", this.callbackUrl);
+    this.startedAtMs = Date.now();
 
-    const startedAt = Date.now();
-    this.status = "launching";
-    await this.ctx.storage.put("status", this.status);
-
-    try {
-      // 1. Launch EC2 with setup script that shuts down on completion
-      const userData = btoa(`#!/bin/bash
+    // 1. Launch EC2 with setup script that shuts down on completion
+    const userData = btoa(`#!/bin/bash
 set -e
 
 # Run the user-provided setup script
@@ -660,6 +743,7 @@ bash /tmp/open-inspect-setup.sh 2>&1 | tee /var/log/open-inspect-setup.log
 shutdown -h now
 `);
 
+    try {
       const launchResult = await this.awsRequest("RunInstances", {
         ImageId: this.env.EC2_AMI_ID,
         InstanceType: "t4g.2xlarge",
@@ -668,7 +752,6 @@ shutdown -h now
         KeyName: "development-am",
         "SecurityGroupId.1": "sg-064453e70f4d22ea9",
         UserData: userData,
-        // Use on-demand for image builds (more reliable than spot)
         TagSpecification: [
           {
             ResourceType: "instance",
@@ -684,97 +767,24 @@ shutdown -h now
       if (!this.instanceId) {
         throw new Error(`Failed to launch EC2 instance: ${JSON.stringify(launchResult)}`);
       }
-      await this.ctx.storage.put("instanceId", this.instanceId);
 
       this.status = "running_setup";
+      await this.ctx.storage.put("buildId", this.buildId);
+      await this.ctx.storage.put("callbackUrl", this.callbackUrl);
+      await this.ctx.storage.put("instanceId", this.instanceId);
+      await this.ctx.storage.put("startedAtMs", this.startedAtMs);
       await this.ctx.storage.put("status", this.status);
 
       console.log(`Image build ${body.buildId}: launched instance ${this.instanceId}`);
 
-      // 2. Wait for instance to stop (setup script calls shutdown -h)
-      await this.waitForInstanceState(this.instanceId, "stopped", IMAGE_BUILD_TIMEOUT_MS);
+      // Schedule first poll in 30 seconds — alarm() drives the rest of the build
+      await this.ctx.storage.setAlarm(Date.now() + IMAGE_BUILD_POLL_INTERVAL_MS);
 
-      this.status = "creating_ami";
-      await this.ctx.storage.put("status", this.status);
-
-      console.log(`Image build ${body.buildId}: instance stopped, creating AMI`);
-
-      // 3. Create AMI from the stopped instance
-      const amiName = `open-inspect-${body.buildId}`;
-      const createImageResult = await this.awsRequest("CreateImage", {
-        InstanceId: this.instanceId,
-        Name: amiName,
-        Description: `Open-Inspect image build ${body.buildId}`,
-        NoReboot: "true",
-      });
-
-      const newAmiId = createImageResult.imageId;
-      if (!newAmiId) {
-        throw new Error(`Failed to create AMI: ${JSON.stringify(createImageResult)}`);
-      }
-
-      console.log(`Image build ${body.buildId}: AMI ${newAmiId} creation started`);
-
-      // 4. Wait for AMI to become available
-      await this.waitForAmiAvailable(newAmiId, AMI_CREATION_TIMEOUT_MS);
-
-      const buildDurationSeconds = Math.round((Date.now() - startedAt) / 1000);
-
-      console.log(
-        `Image build ${body.buildId}: AMI ${newAmiId} available (${buildDurationSeconds}s)`
-      );
-
-      // 5. Terminate the build instance
-      await this.awsRequest("TerminateInstances", { InstanceId: [this.instanceId] });
-
-      this.status = "complete";
-      await this.ctx.storage.put("status", this.status);
-
-      // 6. Callback to control plane
-      await this.sendCallback(body.callbackUrl, {
-        build_id: body.buildId,
-        provider_image_id: newAmiId,
-        build_duration_seconds: buildDurationSeconds,
-      });
-
-      // Clean up DO storage
-      await this.ctx.storage.deleteAll();
-
-      return Response.json({
-        success: true,
-        buildId: body.buildId,
-        amiId: newAmiId,
-        buildDurationSeconds,
-      });
+      return Response.json({ success: true, buildId: body.buildId, status: this.status });
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      console.error(`Image build ${body.buildId} failed: ${errorMessage}`);
-
-      this.status = "failed";
-      await this.ctx.storage.put("status", this.status);
-
-      // Terminate instance if it was launched
-      if (this.instanceId) {
-        try {
-          await this.awsRequest("TerminateInstances", { InstanceId: [this.instanceId] });
-        } catch {
-          // Best-effort cleanup
-        }
-      }
-
-      // Callback failure to control plane
-      const failedCallbackUrl = body.callbackUrl.replace("/build-complete", "/build-failed");
-      try {
-        await this.sendCallback(failedCallbackUrl, {
-          build_id: body.buildId,
-          error: errorMessage,
-        });
-      } catch {
-        // Best-effort callback
-      }
-
-      await this.ctx.storage.deleteAll();
-
+      console.error(`Image build ${body.buildId} launch failed: ${errorMessage}`);
+      await this.failBuild(errorMessage);
       return Response.json(
         { success: false, buildId: body.buildId, error: errorMessage },
         { status: 500 }
@@ -782,56 +792,155 @@ shutdown -h now
     }
   }
 
-  private async waitForInstanceState(
-    instanceId: string,
-    targetState: string,
-    timeoutMs: number
-  ): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    const pollIntervalMs = 15_000;
-
-    while (Date.now() < deadline) {
-      const result = await this.awsRequest("DescribeInstanceStatus", {
-        InstanceId: [instanceId],
-        IncludeAllInstances: "true",
-      });
-
-      if (result.instanceState?.name === targetState) {
-        return;
-      }
-
-      // If instance terminated unexpectedly, fail early
-      if (result.instanceState?.name === "terminated") {
-        throw new Error(`Instance ${instanceId} terminated unexpectedly during setup`);
-      }
-
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
+  /**
+   * Alarm handler — called repeatedly to poll AWS state and advance the build.
+   * Stages: running_setup → creating_ami → complete / failed
+   */
+  async alarm(): Promise<void> {
+    if (!this.buildId || !this.callbackUrl || !this.instanceId) {
+      console.error("EC2ImageBuildDO alarm: missing required state, aborting");
+      await this.ctx.storage.deleteAll();
+      return;
     }
 
-    throw new Error(`Timeout waiting for instance ${instanceId} to reach state "${targetState}"`);
+    // Check global timeout
+    if (this.startedAtMs > 0 && Date.now() - this.startedAtMs > IMAGE_BUILD_TIMEOUT_MS) {
+      console.error(`Image build ${this.buildId}: timed out after ${IMAGE_BUILD_TIMEOUT_MS}ms`);
+      await this.failBuild("Build timed out");
+      return;
+    }
+
+    try {
+      if (this.status === "running_setup") {
+        await this.pollInstanceState();
+      } else if (this.status === "creating_ami") {
+        await this.pollAmiState();
+      } else {
+        // Nothing to do for complete/failed
+        console.log(`EC2ImageBuildDO alarm: status is ${this.status}, no action`);
+      }
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error(`Image build ${this.buildId} alarm error: ${errorMessage}`);
+      await this.failBuild(errorMessage);
+    }
   }
 
-  private async waitForAmiAvailable(amiId: string, timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    const pollIntervalMs = 15_000;
+  private async pollInstanceState(): Promise<void> {
+    const result = await this.awsRequest("DescribeInstanceStatus", {
+      InstanceId: [this.instanceId!],
+      IncludeAllInstances: "true",
+    });
 
-    while (Date.now() < deadline) {
-      const result = await this.awsRequest("DescribeImages", {
-        ImageId: [amiId],
-      });
+    const state = result.instanceState?.name;
+    console.log(`Image build ${this.buildId}: instance state = ${state}`);
 
-      if (result.imageState === "available") {
-        return;
-      }
-
-      if (result.imageState === "failed" || result.imageState === "error") {
-        throw new Error(`AMI ${amiId} creation failed with state: ${result.imageState}`);
-      }
-
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    if (state === "terminated") {
+      throw new Error(`Instance ${this.instanceId} terminated unexpectedly during setup`);
     }
 
-    throw new Error(`Timeout waiting for AMI ${amiId} to become available`);
+    if (state !== "stopped") {
+      // Not done yet — reschedule poll
+      await this.ctx.storage.setAlarm(Date.now() + IMAGE_BUILD_POLL_INTERVAL_MS);
+      return;
+    }
+
+    // Instance stopped — create the AMI
+    console.log(`Image build ${this.buildId}: instance stopped, creating AMI`);
+    const amiName = `open-inspect-${this.buildId}`;
+    const createImageResult = await this.awsRequest("CreateImage", {
+      InstanceId: this.instanceId!,
+      Name: amiName,
+      Description: `Open-Inspect image build ${this.buildId}`,
+      NoReboot: "true",
+    });
+
+    const newAmiId = createImageResult.imageId;
+    if (!newAmiId) {
+      throw new Error(`Failed to create AMI: ${JSON.stringify(createImageResult)}`);
+    }
+
+    console.log(`Image build ${this.buildId}: AMI ${newAmiId} creation started`);
+
+    this.pendingAmiId = newAmiId;
+    this.status = "creating_ami";
+    await this.ctx.storage.put("pendingAmiId", newAmiId);
+    await this.ctx.storage.put("status", this.status);
+
+    // Poll AMI state soon
+    await this.ctx.storage.setAlarm(Date.now() + IMAGE_BUILD_POLL_INTERVAL_MS);
+  }
+
+  private async pollAmiState(): Promise<void> {
+    const amiId = this.pendingAmiId!;
+    const result = await this.awsRequest("DescribeImages", {
+      ImageId: [amiId],
+    });
+
+    const state = result.imageState;
+    console.log(`Image build ${this.buildId}: AMI ${amiId} state = ${state}`);
+
+    if (state === "failed" || state === "error") {
+      throw new Error(`AMI ${amiId} creation failed with state: ${state}`);
+    }
+
+    if (state !== "available") {
+      // Not done yet — reschedule poll
+      await this.ctx.storage.setAlarm(Date.now() + IMAGE_BUILD_POLL_INTERVAL_MS);
+      return;
+    }
+
+    const buildDurationSeconds = Math.round((Date.now() - this.startedAtMs) / 1000);
+    console.log(`Image build ${this.buildId}: AMI ${amiId} available (${buildDurationSeconds}s)`);
+
+    // Terminate the build instance (best-effort)
+    try {
+      await this.awsRequest("TerminateInstances", { InstanceId: [this.instanceId!] });
+    } catch (e) {
+      console.warn(`Image build ${this.buildId}: failed to terminate instance: ${e}`);
+    }
+
+    this.status = "complete";
+    await this.ctx.storage.put("status", this.status);
+
+    // Callback to control plane
+    await this.sendCallback(this.callbackUrl!, {
+      build_id: this.buildId,
+      provider_image_id: amiId,
+      build_duration_seconds: buildDurationSeconds,
+    });
+
+    // Clean up DO storage
+    await this.ctx.storage.deleteAll();
+  }
+
+  private async failBuild(errorMessage: string): Promise<void> {
+    this.status = "failed";
+    await this.ctx.storage.put("status", this.status);
+
+    // Terminate instance if it was launched (best-effort)
+    if (this.instanceId) {
+      try {
+        await this.awsRequest("TerminateInstances", { InstanceId: [this.instanceId] });
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+
+    // Send failure callback (best-effort)
+    if (this.callbackUrl && this.buildId) {
+      const failedCallbackUrl = this.callbackUrl.replace("/build-complete", "/build-failed");
+      try {
+        await this.sendCallback(failedCallbackUrl, {
+          build_id: this.buildId,
+          error: errorMessage,
+        });
+      } catch {
+        // Best-effort
+      }
+    }
+
+    await this.ctx.storage.deleteAll();
   }
 
   private async sendCallback(url: string, body: Record<string, unknown>): Promise<void> {

@@ -39,6 +39,7 @@ import { agentDefaultsRoutes } from "./routes/agent-defaults";
 import { modelPreferencesRoutes } from "./routes/model-preferences";
 import { reposRoutes } from "./routes/repos";
 import { repoImageRoutes } from "./routes/repo-images";
+import { ec2Routes } from "./routes/ec2";
 import { secretsRoutes } from "./routes/secrets";
 import { automationRoutes } from "./routes/automations";
 
@@ -441,8 +442,11 @@ const routes: Route[] = [
   // Integration settings
   ...integrationSettingsRoutes,
 
-  // Repo image builds
+  // Repo image builds (Modal)
   ...repoImageRoutes,
+
+  // EC2 global image builder
+  ...ec2Routes,
 
   // Automations
   ...automationRoutes,

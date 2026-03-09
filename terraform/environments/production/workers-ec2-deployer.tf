@@ -23,8 +23,11 @@ module "ec2_deployer_worker" {
   plain_text_bindings = [
     { name = "AWS_REGION", value = var.aws_region },
     { name = "EC2_AMI_ID", value = var.ec2_ami_id },
-    { name = "CLOUDFLARE_ACCOUNT_ID", value = var.cloudflare_account_id }
+    { name = "CLOUDFLARE_ACCOUNT_ID", value = var.cloudflare_account_id },
+    { name = "CONTROL_PLANE_URL", value = local.control_plane_url }
   ]
+
+  cron_triggers = ["0 6 * * 1"] # Every Monday at 06:00 UTC
 
   secrets = [
     { name = "EC2_API_SECRET", value = var.ec2_api_secret },
