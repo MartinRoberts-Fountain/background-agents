@@ -25,6 +25,8 @@ interface InitRequest {
   parentSessionId?: string | null;
   spawnSource?: SpawnSource;
   spawnDepth?: number;
+  mode?: string | null;
+  sandboxProvider?: string | null;
 }
 
 export interface SessionLifecycleHandlerDeps {
@@ -108,6 +110,8 @@ export function createSessionLifecycleHandler(
         parentSessionId: body.parentSessionId ?? null,
         spawnSource: body.spawnSource ?? "user",
         spawnDepth: body.spawnDepth ?? 0,
+        mode: body.mode ?? null,
+        sandboxProvider: body.sandboxProvider ?? null,
         createdAt: now,
         updatedAt: now,
       });

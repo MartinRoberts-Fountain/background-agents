@@ -1,6 +1,6 @@
 ---
 description: Creates implementation plans for background coding sessions; no code changes
-mode: primary
+mode: subagent
 temperature: 0.1
 tools:
   write: false
@@ -136,7 +136,7 @@ This work is independent; the apply agent should spawn a child session so it get
 
 ## Summary
 
-- **You:** Plan only; no edits, no bash (unless asked and permitted).
-- **Output:** One markdown file in `docs/plans/` with exact paths, TDD steps, and spawn points.
+- **You:** Plan only; no edits,
+- **Output:** Return your plan in Markdown format
 - **Apply agent:** Executes tasks in order; for SPAWN tasks, calls `spawn-task` with the title and
   prompt from the plan, producing smaller, focused PRs.

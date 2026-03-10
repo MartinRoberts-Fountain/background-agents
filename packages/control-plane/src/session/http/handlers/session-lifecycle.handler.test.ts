@@ -201,6 +201,8 @@ describe("createSessionLifecycleHandler", () => {
       parentSessionId: "parent-1",
       spawnSource: "agent",
       spawnDepth: 1,
+      mode: null,
+      sandboxProvider: null,
       createdAt: 1234,
       updatedAt: 1234,
     });
@@ -255,6 +257,198 @@ describe("createSessionLifecycleHandler", () => {
     expect(log.error).toHaveBeenCalledWith(
       "Failed to encrypt SCM token",
       expect.objectContaining({ error: expect.any(Error) })
+    );
+  });
+
+  it("stores mode and sandboxProvider when provided", async () => {
+    const { handler, repository, validateReasoningEffort, generateId } = createHandler();
+    validateReasoningEffort.mockReturnValue(null);
+    generateId.mockReturnValueOnce("sandbox-1").mockReturnValueOnce("participant-1");
+
+    const response = await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          userId: "user-1",
+          mode: "apply",
+          sandboxProvider: "ec2",
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(repository.upsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "apply",
+        sandboxProvider: "ec2",
+      })
+    );
+  });
+
+  it("stores mode:plan and sandboxProvider:helm when provided", async () => {
+    const { handler, repository, validateReasoningEffort, generateId } = createHandler();
+    validateReasoningEffort.mockReturnValue(null);
+    generateId.mockReturnValueOnce("sandbox-1").mockReturnValueOnce("participant-1");
+
+    await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          userId: "user-1",
+          mode: "plan",
+          sandboxProvider: "helm",
+        }),
+      })
+    );
+
+    expect(repository.upsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "plan",
+        sandboxProvider: "helm",
+      })
+    );
+  });
+
+  it("stores mode:code_review with null sandboxProvider when provider is omitted", async () => {
+    const { handler, repository, validateReasoningEffort, generateId } = createHandler();
+    validateReasoningEffort.mockReturnValue(null);
+    generateId.mockReturnValueOnce("sandbox-1").mockReturnValueOnce("participant-1");
+
+    await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          userId: "user-1",
+          mode: "code_review",
+        }),
+      })
+    );
+
+    expect(repository.upsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "code_review",
+        sandboxProvider: null,
+      })
+    );
+  });
+
+  it("stores null for mode and sandboxProvider when both are omitted from request", async () => {
+    const { handler, repository, validateReasoningEffort, generateId } = createHandler();
+    validateReasoningEffort.mockReturnValue(null);
+    generateId.mockReturnValueOnce("sandbox-1").mockReturnValueOnce("participant-1");
+
+    await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          userId: "user-1",
+        }),
+      })
+    );
+
+    expect(repository.upsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: null,
+        sandboxProvider: null,
+      })
+    );
+  });
+
+  it("stores null for mode and sandboxProvider when explicitly passed as null", async () => {
+    const { handler, repository, validateReasoningEffort, generateId } = createHandler();
+    validateReasoningEffort.mockReturnValue(null);
+    generateId.mockReturnValueOnce("sandbox-1").mockReturnValueOnce("participant-1");
+
+    await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          userId: "user-1",
+          mode: null,
+          sandboxProvider: null,
+        }),
+      })
+    );
+
+    expect(repository.upsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: null,
+        sandboxProvider: null,
+      })
+    );
+  });
+
+  it("stores sandboxProvider:modal with null mode", async () => {
+    const { handler, repository, validateReasoningEffort, generateId } = createHandler();
+    validateReasoningEffort.mockReturnValue(null);
+    generateId.mockReturnValueOnce("sandbox-1").mockReturnValueOnce("participant-1");
+
+    await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          userId: "user-1",
+          sandboxProvider: "modal",
+        }),
+      })
+    );
+
+    expect(repository.upsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: null,
+        sandboxProvider: "modal",
+      })
+    );
+  });
+
+  it("mode and sandboxProvider are stored independently — apply mode without provider stores null provider", async () => {
+    const { handler, repository, validateReasoningEffort, generateId } = createHandler();
+    validateReasoningEffort.mockReturnValue(null);
+    generateId.mockReturnValueOnce("sandbox-1").mockReturnValueOnce("participant-1");
+
+    await handler.init(
+      new Request("http://internal/internal/init", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sessionName: "session-public-id",
+          repoOwner: "acme",
+          repoName: "repo",
+          userId: "user-1",
+          mode: "apply",
+        }),
+      })
+    );
+
+    expect(repository.upsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "apply",
+        sandboxProvider: null,
+      })
     );
   });
 

@@ -996,7 +996,7 @@ function buildPrompt(
     }
 
     // Include comments for context, excluding bot-generated and unknown-author comments
-    const EXCLUDED_AUTHORS = new Set(["Fountain Coding Agent", "Unknown"]);
+    const EXCLUDED_AUTHORS = new Set(["Fountain Coding AgentX", "Unknown"]);
     const filteredComments = issueDetails.comments.filter(
       (c) =>
         !isSessionThreadMarkerComment(c.body) && c.user?.name && !EXCLUDED_AUTHORS.has(c.user.name)
