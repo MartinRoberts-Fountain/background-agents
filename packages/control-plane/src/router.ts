@@ -41,6 +41,7 @@ import { reposRoutes } from "./routes/repos";
 import { repoImageRoutes } from "./routes/repo-images";
 import { secretsRoutes } from "./routes/secrets";
 import { automationRoutes } from "./routes/automations";
+import { modeTemplateRoutes } from "./routes/mode-templates";
 
 const logger = createLogger("router");
 
@@ -298,14 +299,20 @@ async function requireInternalAuth(
 
   if (!isValid) {
     const clientIP = request.headers.get("CF-Connecting-IP") || "unknown";
+    const authHeader = request.headers.get("Authorization");
     logger.warn("Auth failed: HMAC", {
       event: "auth.hmac_failed",
       http_path: path,
       client_ip: clientIP,
       request_id: ctx.request_id,
       trace_id: ctx.trace_id,
+      has_auth_header: !!authHeader,
+      auth_header_prefix: authHeader?.slice(0, 10),
     });
-    return error("Unauthorized", 401);
+    return error(
+      `Unauthorized: HMAC signature verification failed (Path: ${path}, Trace ID: ${ctx.trace_id})`,
+      401
+    );
   }
 
   return null; // Auth passed
@@ -443,6 +450,9 @@ const routes: Route[] = [
 
   // Repo image builds
   ...repoImageRoutes,
+
+  // Mode templates
+  ...modeTemplateRoutes,
 
   // Automations
   ...automationRoutes,
@@ -742,6 +752,7 @@ async function handleCreateSession(
     baseBranch: body.branch || defaultBranch || "main",
     status: "created",
     mode: body.mode || "apply",
+    sandboxProvider: body.sandboxProvider ?? null,
     createdAt: now,
     updatedAt: now,
   });
@@ -1345,6 +1356,7 @@ async function handleSpawnChild(
           scmName: spawnContext.owner.scmName,
           scmEmail: spawnContext.owner.scmEmail,
           scmTokenEncrypted: spawnContext.owner.scmAccessTokenEncrypted,
+          branch: spawnContext.baseBranch ?? "main",
           parentSessionId: parentId,
           spawnSource: "agent",
           spawnDepth: childDepth,
@@ -1369,12 +1381,13 @@ async function handleSpawnChild(
     repoName: spawnContext.repoName,
     model,
     reasoningEffort,
-    baseBranch: null,
+    baseBranch: spawnContext.baseBranch ?? "main",
     status: "created",
     parentSessionId: parentId,
     spawnSource: "agent",
     spawnDepth: childDepth,
     mode,
+    sandboxProvider,
     createdAt: now,
     updatedAt: now,
   });

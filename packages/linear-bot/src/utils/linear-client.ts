@@ -127,6 +127,66 @@ export async function getLinearClient(env: Env, orgId: string): Promise<LinearAp
 }
 
 /**
+ * Update issue properties (labels, etc.)
+ */
+export async function updateIssue(
+  client: LinearApiClient,
+  issueId: string,
+  input: Record<string, unknown>
+): Promise<void> {
+  try {
+    await linearGraphQL(
+      client,
+      `
+      mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+        issueUpdate(id: $id, input: $input) {
+          success
+        }
+      }
+    `,
+      { id: issueId, input }
+    );
+  } catch (err) {
+    log.error("linear.update_issue_failed", {
+      issue_id: issueId,
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+  }
+}
+
+/**
+ * Remove a label from an issue by name.
+ */
+export async function removeIssueLabel(
+  client: LinearApiClient,
+  issueId: string,
+  labelName: string
+): Promise<void> {
+  try {
+    const issue = await fetchIssueDetails(client, issueId);
+    if (!issue) return;
+
+    const labelToRemove = labelName.toLowerCase();
+    const remainingLabelIds = issue.labels
+      .filter((l) => l.name.toLowerCase() !== labelToRemove)
+      .map((l) => l.id);
+
+    if (remainingLabelIds.length === issue.labels.length) {
+      // Label not found, nothing to do
+      return;
+    }
+
+    await updateIssue(client, issueId, { labelIds: remainingLabelIds });
+  } catch (err) {
+    log.error("linear.remove_label_failed", {
+      issue_id: issueId,
+      label: labelName,
+      error: err instanceof Error ? err : new Error(String(err)),
+    });
+  }
+}
+
+/**
  * Execute a GraphQL query against the Linear API.
  */
 async function linearGraphQL(
@@ -217,7 +277,7 @@ export async function fetchIssueDetails(
           project { id name }
           assignee { id name }
           team { id key name }
-          comments(first: 10, orderBy: createdAt) {
+          comments(last: 50, orderBy: createdAt) {
             nodes {
               body
               user { name }

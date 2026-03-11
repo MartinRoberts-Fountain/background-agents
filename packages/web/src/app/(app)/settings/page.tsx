@@ -7,6 +7,7 @@ import { SettingsNav, type SettingsCategory } from "@/components/settings/settin
 import { SecretsSettings } from "@/components/settings/secrets-settings";
 import { ModelsSettings } from "@/components/settings/models-settings";
 import { AgentsSettings } from "@/components/settings/agents-settings";
+import { ModeTemplatesSettings } from "@/components/settings/mode-templates-settings";
 import { DataControlsSettings } from "@/components/settings/data-controls-settings";
 import { KeyboardShortcutsSettings } from "@/components/settings/keyboard-shortcuts-settings";
 import { IntegrationsSettings } from "@/components/settings/integrations-settings";
@@ -19,6 +20,7 @@ const CATEGORY_LABELS: Record<SettingsCategory, string> = {
   secrets: "Secrets",
   models: "Models",
   agents: "Agents",
+  modes: "Modes",
   images: "Images",
   "keyboard-shortcuts": "Keyboard",
   "data-controls": "Data Controls",
@@ -29,6 +31,7 @@ const VALID_CATEGORIES = new Set<string>([
   "secrets",
   "models",
   "agents",
+  "modes",
   "images",
   "keyboard-shortcuts",
   "data-controls",
@@ -63,6 +66,7 @@ export default function SettingsPage() {
       {activeCategory === "secrets" && <SecretsSettings />}
       {activeCategory === "models" && <ModelsSettings />}
       {activeCategory === "agents" && <AgentsSettings />}
+      {activeCategory === "modes" && <ModeTemplatesSettings />}
       {activeCategory === "images" && <ImagesSettings />}
       {activeCategory === "keyboard-shortcuts" && <KeyboardShortcutsSettings />}
       {activeCategory === "data-controls" && <DataControlsSettings />}

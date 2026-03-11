@@ -98,7 +98,11 @@ resource "cloudflare_worker_version" "this" {
   migrations = length(var.durable_objects) > 0 && !var.enable_durable_object_bindings ? {
     old_tag            = var.migration_old_tag
     new_tag            = var.migration_tag
-    new_sqlite_classes = length(var.new_sqlite_classes) > 0 ? var.new_sqlite_classes : [for do in var.durable_objects : do.class_name]
+    # For fresh migrations (no old_tag), default to declaring all DO classes as new.
+    # For incremental migrations (old_tag set), default to empty (no new classes unless explicitly specified).
+    new_sqlite_classes = length(var.new_sqlite_classes) > 0 ? var.new_sqlite_classes : (
+      var.migration_old_tag == null ? [for do in var.durable_objects : do.class_name] : []
+    )
   } : null
 }
 

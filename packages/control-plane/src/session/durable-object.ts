@@ -11,7 +11,7 @@ import { DurableObject } from "cloudflare:workers";
 import { initSchema } from "./schema";
 import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
 import { generateId, hashToken, timingSafeEqual } from "../auth/crypto";
-import { getGitHubAppConfig, getCachedInstallationToken } from "../auth/github-app";
+import { getGitHubAppConfig } from "../auth/github-app";
 import { createModalClient } from "../sandbox/client";
 import { createModalProvider } from "../sandbox/providers/modal-provider";
 import { createHelmProvider } from "../sandbox/providers/helm-provider";
@@ -40,12 +40,7 @@ import {
   type SourceControlProvider,
   type GitPushSpec,
 } from "../source-control";
-import {
-  DEFAULT_MODEL,
-  isValidModel,
-  isValidReasoningEffort,
-  getValidModelOrDefault,
-} from "../utils/models";
+import { DEFAULT_MODEL, isValidReasoningEffort } from "../utils/models";
 import type {
   Env,
   ClientInfo,
@@ -55,10 +50,7 @@ import type {
   SessionState,
   SessionStatus,
   SandboxStatus,
-  ParticipantRole,
-  SpawnSource,
 } from "../types";
-import type { SpawnContext } from "@open-inspect/shared";
 import type { SessionRow, ArtifactRow, SandboxRow } from "./types";
 import { SessionRepository } from "./repository";
 import { SessionWebSocketManagerImpl, type SessionWebSocketManager } from "./websocket-manager";
@@ -69,13 +61,31 @@ import { mergeSecrets } from "../db/secrets-validation";
 import { OpenAITokenRefreshService } from "./openai-token-refresh-service";
 import { ParticipantService, getAvatarUrl } from "./participant-service";
 import { UserScmTokenStore } from "../db/user-scm-tokens";
-import { DOFetcherAdapter } from "../scheduler/do-fetcher-adapter";
 import { CallbackNotificationService } from "./callback-notification-service";
+import { DOFetcherAdapter } from "../scheduler/do-fetcher-adapter";
 import { PresenceService } from "./presence-service";
 import { SessionMessageQueue } from "./message-queue";
 import { SessionSandboxEventProcessor } from "./sandbox-events";
 import { createSessionInternalRoutes } from "./http/routes";
 import { createMessagesHandler, type MessagesHandler } from "./http/handlers/messages.handler";
+import {
+  createChildSessionsHandler,
+  type ChildSessionsHandler,
+} from "./http/handlers/child-sessions.handler";
+import { createSandboxHandler, type SandboxHandler } from "./http/handlers/sandbox.handler";
+import { createWsTokenHandler, type WsTokenHandler } from "./http/handlers/ws-token.handler";
+import {
+  createSessionLifecycleHandler,
+  type SessionLifecycleHandler,
+} from "./http/handlers/session-lifecycle.handler";
+import {
+  createPullRequestHandler,
+  type PullRequestHandler,
+} from "./http/handlers/pull-request.handler";
+import {
+  createParticipantsHandler,
+  type ParticipantsHandler,
+} from "./http/handlers/participants.handler";
 import { MessageService } from "./services/message.service";
 
 /**
@@ -92,9 +102,6 @@ const WS_AUTH_TIMEOUT_MS = 30000; // 30 seconds
  * the client to fetch a fresh token on reconnect.
  */
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-/** Statuses that indicate a session has reached a final state and cannot be cancelled. */
-const TERMINAL_STATUSES = new Set(["completed", "archived", "cancelled", "failed"]);
 
 export class SessionDO extends DurableObject<Env> {
   private sql: SqlStorage;
@@ -119,18 +126,30 @@ export class SessionDO extends DurableObject<Env> {
   private _messageService: MessageService | null = null;
   // Messages handler (lazily initialized)
   private _messagesHandler: MessagesHandler | null = null;
+  // Child sessions handler (lazily initialized)
+  private _childSessionsHandler: ChildSessionsHandler | null = null;
+  // Sandbox handler (lazily initialized)
+  private _sandboxHandler: SandboxHandler | null = null;
+  // WebSocket token handler (lazily initialized)
+  private _wsTokenHandler: WsTokenHandler | null = null;
+  // Session lifecycle handler (lazily initialized)
+  private _sessionLifecycleHandler: SessionLifecycleHandler | null = null;
+  // Pull request handler (lazily initialized)
+  private _pullRequestHandler: PullRequestHandler | null = null;
+  // Participants handler (lazily initialized)
+  private _participantsHandler: ParticipantsHandler | null = null;
   // Sandbox event processor (lazily initialized)
   private _sandboxEventProcessor: SessionSandboxEventProcessor | null = null;
 
   // Internal HTTP route table (transport wiring only; handlers remain on SessionDO).
   private readonly routes = createSessionInternalRoutes({
-    init: (request) => this.handleInit(request),
-    state: () => this.handleGetState(),
+    init: (request) => this.sessionLifecycleHandler.init(request),
+    state: () => this.sessionLifecycleHandler.getState(),
     prompt: (request) => this.messagesHandler.enqueuePrompt(request),
     stop: () => this.messagesHandler.stop(),
-    sandboxEvent: (request) => this.handleSandboxEvent(request),
-    listParticipants: () => this.handleListParticipants(),
-    addParticipant: (request) => this.handleAddParticipant(request),
+    sandboxEvent: (request) => this.sandboxHandler.sandboxEvent(request),
+    listParticipants: () => this.participantsHandler.listParticipants(),
+    addParticipant: (request) => this.sandboxHandler.addParticipant(request),
     listEvents: (_request, url) => this.messagesHandler.listEvents(url),
     listArtifacts: () => this.messagesHandler.listArtifacts(),
     listMessages: (_request, url) => this.messagesHandler.listMessages(url),
@@ -319,6 +338,138 @@ export class SessionDO extends DurableObject<Env> {
     return this._messagesHandler;
   }
 
+  private get childSessionsHandler(): ChildSessionsHandler {
+    if (!this._childSessionsHandler) {
+      this._childSessionsHandler = createChildSessionsHandler({
+        repository: this.repository,
+        getSession: () => this.getSession(),
+        getSandbox: () => this.getSandbox(),
+        getPublicSessionId: (session) => this.getPublicSessionId(session),
+        broadcast: (message) => this.broadcast(message),
+      });
+    }
+
+    return this._childSessionsHandler;
+  }
+
+  private get sandboxHandler(): SandboxHandler {
+    if (!this._sandboxHandler) {
+      this._sandboxHandler = createSandboxHandler({
+        repository: this.repository,
+        processSandboxEvent: (event) => this.processSandboxEvent(event),
+        getSandbox: () => this.getSandbox(),
+        isValidSandboxToken: (token, sandbox) => this.isValidSandboxToken(token, sandbox),
+        getSession: () => this.getSession(),
+        refreshOpenAIToken: async (session) => {
+          const service = new OpenAITokenRefreshService(
+            this.env.DB!,
+            this.env.REPO_SECRETS_ENCRYPTION_KEY!,
+            (sessionRow) => this.ensureRepoId(sessionRow),
+            this.log
+          );
+          return service.refresh(session);
+        },
+        isOpenAISecretsConfigured: () =>
+          Boolean(this.env.DB && this.env.REPO_SECRETS_ENCRYPTION_KEY),
+        generateId: () => generateId(),
+        now: () => Date.now(),
+        getLog: () => this.log,
+      });
+    }
+
+    return this._sandboxHandler;
+  }
+
+  private get wsTokenHandler(): WsTokenHandler {
+    if (!this._wsTokenHandler) {
+      this._wsTokenHandler = createWsTokenHandler({
+        repository: this.repository,
+        getParticipantByUserId: (userId) => this.participantService.getByUserId(userId),
+        generateId: (bytes) => generateId(bytes),
+        hashToken: (token) => hashToken(token),
+        now: () => Date.now(),
+        getLog: () => this.log,
+      });
+    }
+
+    return this._wsTokenHandler;
+  }
+
+  private get sessionLifecycleHandler(): SessionLifecycleHandler {
+    if (!this._sessionLifecycleHandler) {
+      this._sessionLifecycleHandler = createSessionLifecycleHandler({
+        repository: this.repository,
+        getDurableObjectId: () => this.ctx.id.toString(),
+        tokenEncryptionKey: this.env.TOKEN_ENCRYPTION_KEY,
+        encryptToken: async (token, encryptionKey) => {
+          const { encryptToken } = await import("../auth/crypto");
+          return encryptToken(token, encryptionKey);
+        },
+        validateReasoningEffort: (model, effort) => this.validateReasoningEffort(model, effort),
+        generateId: (bytes) => generateId(bytes),
+        now: () => Date.now(),
+        scheduleWarmSandbox: () => this.ctx.waitUntil(this.warmSandbox()),
+        getLog: () => this.log,
+        getSession: () => this.getSession(),
+        getSandbox: () => this.getSandbox(),
+        getPublicSessionId: (session) => this.getPublicSessionId(session),
+        getParticipantByUserId: (userId) => this.participantService.getByUserId(userId),
+        transitionSessionStatus: (status) => this.transitionSessionStatus(status),
+        stopExecution: (options) => this.stopExecution(options),
+        getSandboxSocket: () => this.wsManager.getSandboxSocket(),
+        sendToSandbox: (ws, message) => this.wsManager.send(ws, message),
+        updateSandboxStatus: (status) => this.updateSandboxStatus(status),
+      });
+    }
+
+    return this._sessionLifecycleHandler;
+  }
+
+  private get pullRequestHandler(): PullRequestHandler {
+    if (!this._pullRequestHandler) {
+      this._pullRequestHandler = createPullRequestHandler({
+        getSession: () => this.getSession(),
+        getPromptingParticipantForPR: () => this.participantService.getPromptingParticipantForPR(),
+        resolveAuthForPR: (participant) => this.participantService.resolveAuthForPR(participant),
+        getSessionUrl: (session) => {
+          const sessionId = session.session_name || session.id;
+          const webAppUrl = this.env.WEB_APP_URL || this.env.WORKER_URL || "";
+          return webAppUrl + "/session/" + sessionId;
+        },
+        createPullRequest: async (input) => {
+          const pullRequestService = new SessionPullRequestService({
+            repository: this.repository,
+            sourceControlProvider: this.sourceControlProvider,
+            log: this.log,
+            generateId: () => generateId(),
+            pushBranchToRemote: (headBranch, pushSpec) =>
+              this.pushBranchToRemote(headBranch, pushSpec),
+            broadcastArtifactCreated: (artifact) => {
+              this.broadcast({
+                type: "artifact_created",
+                artifact,
+              });
+            },
+          });
+
+          return pullRequestService.createPullRequest(input);
+        },
+      });
+    }
+
+    return this._pullRequestHandler;
+  }
+
+  private get participantsHandler(): ParticipantsHandler {
+    if (!this._participantsHandler) {
+      this._participantsHandler = createParticipantsHandler({
+        repository: this.repository,
+      });
+    }
+
+    return this._participantsHandler;
+  }
+
   private get sandboxEventProcessor(): SessionSandboxEventProcessor {
     if (!this._sandboxEventProcessor) {
       this._sandboxEventProcessor = new SessionSandboxEventProcessor({
@@ -362,14 +513,15 @@ export class SessionDO extends DurableObject<Env> {
    * Create the lifecycle manager with all required adapters.
    */
   private createLifecycleManager(): SandboxLifecycleManager {
-    // Session-level provider override takes precedence over mode-based defaults.
     const session = this.repository.getSession();
     let sandboxProvider = session?.sandbox_provider;
 
-    if (!sandboxProvider) {
-      if (session?.mode === "plan") {
-        sandboxProvider = "helm";
-      } else if (session?.mode === "apply") {
+    // Plan mode always uses Helm/Kubernetes, regardless of any sandbox_provider override.
+    // EC2 is only used for apply mode; session-level overrides apply for all other cases.
+    if (session?.mode === "plan") {
+      sandboxProvider = "helm";
+    } else if (!sandboxProvider) {
+      if (session?.mode === "apply") {
         sandboxProvider = "ec2";
       } else {
         sandboxProvider = this.env.HELM_API_URL && this.env.HELM_API_SECRET ? "helm" : "modal";
@@ -390,8 +542,11 @@ export class SessionDO extends DurableObject<Env> {
         tunnelToken: this.env.CLOUDFLARE_TUNNEL_TOKEN || "",
         scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
       });
-    } else if (sandboxProvider === "ec2" && this.env.EC2_API_URL && this.env.EC2_API_SECRET) {
-      // EC2 provider (only when configured)
+    } else if (sandboxProvider === "ec2") {
+      // EC2 provider
+      if (!this.env.EC2_API_URL || !this.env.EC2_API_SECRET) {
+        throw new Error("EC2_API_URL and EC2_API_SECRET are required for EC2 provider");
+      }
       provider = createEC2Provider({
         apiUrl: this.env.EC2_API_URL,
         apiSecret: this.env.EC2_API_SECRET,
@@ -412,6 +567,15 @@ export class SessionDO extends DurableObject<Env> {
       getSandboxWithCircuitBreaker: () => this.repository.getSandboxWithCircuitBreaker(),
       getSession: () => this.repository.getSession(),
       getUserEnvVars: () => this.getUserEnvVars(),
+      getVcsToken: async () => {
+        try {
+          const auth = await this.sourceControlProvider.generatePushAuth();
+          return auth.token;
+        } catch (e) {
+          this.log.error("Failed to generate VCS token for sandbox", { error: e });
+          return null;
+        }
+      },
       updateSandboxStatus: (status) => this.updateSandboxStatus(status),
       updateSandboxForSpawn: (data) => this.repository.updateSandboxForSpawn(data),
       updateSandboxModalObjectId: (id) => this.repository.updateSandboxModalObjectId(id),
@@ -419,16 +583,6 @@ export class SessionDO extends DurableObject<Env> {
         this.repository.updateSandboxSnapshotImageId(sandboxId, imageId),
       updateSandboxLastActivity: (timestamp) =>
         this.repository.updateSandboxLastActivity(timestamp),
-      stopSandbox: async (providerObjectId) => {
-        if ("stopSandbox" in provider && typeof provider.stopSandbox === "function") {
-          await provider.stopSandbox(providerObjectId);
-        }
-      },
-      startSandbox: async (providerObjectId) => {
-        if ("startSandbox" in provider && typeof provider.startSandbox === "function") {
-          await provider.startSandbox(providerObjectId);
-        }
-      },
       incrementCircuitBreakerFailure: (timestamp) =>
         this.repository.incrementCircuitBreakerFailure(timestamp),
       resetCircuitBreaker: () => this.repository.resetCircuitBreaker(),
@@ -494,7 +648,8 @@ export class SessionDO extends DurableObject<Env> {
     if (this.env.DB) {
       const repoImageStore = new RepoImageStore(this.env.DB);
       repoImageLookup = {
-        getLatestReady: (repoOwner, repoName) => repoImageStore.getLatestReady(repoOwner, repoName),
+        getLatestReady: (repoOwner, repoName, baseBranch) =>
+          repoImageStore.getLatestReady(repoOwner, repoName, baseBranch),
       };
     }
 
@@ -735,32 +890,10 @@ export class SessionDO extends DurableObject<Env> {
 
   /**
    * Handle WebSocket close.
-   * Code 1006 (abnormal closure) means no close frame was received — e.g. network
-   * drop, process exit, or client navigated away. The platform may log this as an
-   * "error"; our structured log below allows correlating and identifying which
-   * socket (client vs sandbox) closed.
    */
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
     this.ensureInitialized();
     const { kind } = this.wsManager.classify(ws);
-
-    const isNormalClose = code === 1000 || code === 1001;
-    const logData: Record<string, unknown> = {
-      event: "ws.close",
-      ws_kind: kind,
-      code,
-      reason: reason || "(none)",
-      durable_object_id: this.ctx.id.toString(),
-    };
-    if (code === 1006) {
-      logData.code_meaning = "abnormal_closure";
-      logData.hint = "no close frame (e.g. network drop, process exit, client navigated away)";
-    }
-    if (isNormalClose) {
-      this.log.info("WebSocket closed", logData);
-    } else {
-      this.log.warn("WebSocket closed (abnormal)", logData);
-    }
 
     try {
       if (kind === "sandbox") {
@@ -771,6 +904,7 @@ export class SessionDO extends DurableObject<Env> {
           return;
         }
 
+        const isNormalClose = code === 1000 || code === 1001;
         if (isNormalClose) {
           this.updateSandboxStatus("stopped");
         } else {
@@ -800,13 +934,7 @@ export class SessionDO extends DurableObject<Env> {
    */
   async webSocketError(ws: WebSocket, error: Error): Promise<void> {
     this.ensureInitialized();
-    const { kind } = this.wsManager.classify(ws);
-    this.log.error("WebSocket error", {
-      event: "ws.error",
-      ws_kind: kind,
-      durable_object_id: this.ctx.id.toString(),
-      error,
-    });
+    this.log.error("WebSocket error", { error });
     ws.close(1011, "Internal error");
   }
 
@@ -1382,6 +1510,7 @@ export class SessionDO extends DurableObject<Env> {
       reasoningEffort: session?.reasoning_effort ?? undefined,
       isProcessing,
       parentSessionId: session?.parent_session_id ?? null,
+      sandboxProvider: (session?.sandbox_provider as "modal" | "helm" | "ec2" | null) ?? null,
     };
   }
 
@@ -1426,87 +1555,57 @@ export class SessionDO extends DurableObject<Env> {
       return undefined;
     }
 
-    let merged: Record<string, string> = {};
-
-    if (this.env.DB && this.env.REPO_SECRETS_ENCRYPTION_KEY) {
-      // Fetch global secrets
-      let globalSecrets: Record<string, string> = {};
-      try {
-        const globalStore = new GlobalSecretsStore(
-          this.env.DB,
-          this.env.REPO_SECRETS_ENCRYPTION_KEY
-        );
-        globalSecrets = await globalStore.getDecryptedSecrets();
-      } catch (e) {
-        this.log.error("Failed to load global secrets, proceeding without", {
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-
-      // Fetch repo secrets
-      let repoSecrets: Record<string, string> = {};
-      try {
-        const repoId = await this.ensureRepoId(session);
-        const repoStore = new RepoSecretsStore(this.env.DB, this.env.REPO_SECRETS_ENCRYPTION_KEY);
-        repoSecrets = await repoStore.getDecryptedSecrets(repoId);
-      } catch (e) {
-        this.log.warn("Failed to load repo secrets, proceeding without", {
-          repo_owner: session.repo_owner,
-          repo_name: session.repo_name,
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-
-      // Merge: repo overrides global
-      const {
-        merged: mergedFromD1,
-        totalBytes,
-        exceedsLimit,
-      } = mergeSecrets(globalSecrets, repoSecrets);
-      merged = mergedFromD1;
-
-      const mergedCount = Object.keys(merged).length;
-      if (mergedCount > 0) {
-        const logLevel = exceedsLimit ? "warn" : "info";
-        this.log[logLevel]("Secrets merged for sandbox", {
-          global_count: Object.keys(globalSecrets).length,
-          repo_count: Object.keys(repoSecrets).length,
-          merged_count: mergedCount,
-          payload_bytes: totalBytes,
-          exceeds_limit: exceedsLimit,
-        });
-      }
-    } else {
+    if (!this.env.DB || !this.env.REPO_SECRETS_ENCRYPTION_KEY) {
       this.log.debug("Secrets not configured, skipping", {
         has_db: !!this.env.DB,
         has_encryption_key: !!this.env.REPO_SECRETS_ENCRYPTION_KEY,
       });
+      return undefined;
     }
 
-    // Inject GitHub App installation token as clone token if not already provided.
-    // This is required for private repositories when no VCS_CLONE_TOKEN is stored as a secret.
-    const hasCloneToken =
-      merged["VCS_CLONE_TOKEN"] || merged["GITHUB_APP_TOKEN"] || merged["GITHUB_TOKEN"];
-    if (!hasCloneToken) {
-      const appConfig = getGitHubAppConfig(this.env);
-      if (appConfig) {
-        try {
-          const installationToken = await getCachedInstallationToken(appConfig, {
-            REPOS_CACHE: this.env.REPOS_CACHE,
-          });
-          merged["VCS_CLONE_TOKEN"] = installationToken;
-          merged["GITHUB_APP_TOKEN"] = installationToken;
-          merged["GITHUB_TOKEN"] = installationToken;
-          this.log.debug("GitHub App installation token injected as clone token");
-        } catch (e) {
-          this.log.warn("Failed to generate GitHub App installation token for clone", {
-            error: e instanceof Error ? e.message : String(e),
-          });
-        }
-      }
+    // Fetch global secrets
+    let globalSecrets: Record<string, string> = {};
+    try {
+      const globalStore = new GlobalSecretsStore(this.env.DB, this.env.REPO_SECRETS_ENCRYPTION_KEY);
+      globalSecrets = await globalStore.getDecryptedSecrets();
+    } catch (e) {
+      this.log.error("Failed to load global secrets, proceeding without", {
+        error: e instanceof Error ? e.message : String(e),
+      });
     }
 
-    return Object.keys(merged).length === 0 ? undefined : merged;
+    // Fetch repo secrets
+    let repoSecrets: Record<string, string> = {};
+    try {
+      const repoId = await this.ensureRepoId(session);
+      const repoStore = new RepoSecretsStore(this.env.DB, this.env.REPO_SECRETS_ENCRYPTION_KEY);
+      repoSecrets = await repoStore.getDecryptedSecrets(repoId);
+    } catch (e) {
+      this.log.warn("Failed to load repo secrets, proceeding without", {
+        repo_owner: session.repo_owner,
+        repo_name: session.repo_name,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    // Merge: repo overrides global
+    const { merged, totalBytes, exceedsLimit } = mergeSecrets(globalSecrets, repoSecrets);
+    const globalCount = Object.keys(globalSecrets).length;
+    const repoCount = Object.keys(repoSecrets).length;
+    const mergedCount = Object.keys(merged).length;
+
+    if (mergedCount > 0) {
+      const logLevel = exceedsLimit ? "warn" : "info";
+      this.log[logLevel]("Secrets merged for sandbox", {
+        global_count: globalCount,
+        repo_count: repoCount,
+        merged_count: mergedCount,
+        payload_bytes: totalBytes,
+        exceeds_limit: exceedsLimit,
+      });
+    }
+
+    return mergedCount === 0 ? undefined : merged;
   }
 
   /**
@@ -1672,266 +1771,6 @@ export class SessionDO extends DurableObject<Env> {
 
   // HTTP handlers
 
-  private async handleInit(request: Request): Promise<Response> {
-    const body = (await request.json()) as {
-      sessionName: string; // The name used for WebSocket routing
-      repoOwner: string;
-      repoName: string;
-      repoId?: number;
-      defaultBranch?: string; // Repo's default branch from GitHub
-      branch?: string; // User-selected branch to work on
-      title?: string;
-      model?: string; // LLM model to use
-      reasoningEffort?: string; // Reasoning effort level
-      agent?: string | null; // OpenCode primary agent id (e.g. from .opencode/agents/foo.md)
-      sandboxProvider?: string | null; // Infrastructure provider override ("modal" or "helm")
-      mode?: "plan" | "apply" | null;
-      userId: string;
-      scmLogin?: string;
-      scmName?: string;
-      scmEmail?: string;
-      scmToken?: string | null; // Plain SCM token (will be encrypted)
-      scmTokenEncrypted?: string | null; // Pre-encrypted SCM token
-      parentSessionId?: string | null;
-      spawnSource?: SpawnSource;
-      spawnDepth?: number;
-    };
-
-    const sessionId = this.ctx.id.toString();
-    const sessionName = body.sessionName; // Store the WebSocket routing name
-    const now = Date.now();
-
-    // Encrypt the SCM token if provided in plain text
-    let encryptedToken = body.scmTokenEncrypted ?? null;
-    if (body.scmToken && this.env.TOKEN_ENCRYPTION_KEY) {
-      try {
-        const { encryptToken } = await import("../auth/crypto");
-        encryptedToken = await encryptToken(body.scmToken, this.env.TOKEN_ENCRYPTION_KEY);
-        this.log.debug("Encrypted SCM token for storage");
-      } catch (err) {
-        this.log.error("Failed to encrypt SCM token", {
-          error: err instanceof Error ? err : String(err),
-        });
-      }
-    }
-
-    // Validate and normalize model name if provided
-    const model = getValidModelOrDefault(body.model);
-    if (body.model && !isValidModel(body.model)) {
-      this.log.warn("Invalid model name, using default", {
-        requested_model: body.model,
-        default_model: DEFAULT_MODEL,
-      });
-    }
-
-    // Validate reasoning effort if provided
-    const reasoningEffort = this.validateReasoningEffort(model, body.reasoningEffort);
-
-    // Resolve branch: user-selected branch takes priority, then repo default, then "main"
-    const baseBranch = body.branch || body.defaultBranch || "main";
-
-    // Create session (store both internal ID and external name)
-    this.repository.upsertSession({
-      id: sessionId,
-      sessionName, // Store the session name for WebSocket routing
-      title: body.title ?? null,
-      repoOwner: body.repoOwner,
-      repoName: body.repoName,
-      repoId: body.repoId ?? null,
-      baseBranch,
-      model,
-      reasoningEffort,
-      status: "created",
-      parentSessionId: body.parentSessionId ?? null,
-      spawnSource: body.spawnSource ?? "user",
-      spawnDepth: body.spawnDepth ?? 0,
-      defaultAgent: body.agent ?? null,
-      sandboxProvider: body.sandboxProvider ?? null,
-      mode: body.mode ?? null,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    // Create sandbox record
-    // Note: created_at is set to 0 initially so the first spawn isn't blocked by cooldown
-    // It will be updated to the actual spawn time when spawnSandbox() is called
-    const sandboxId = generateId();
-    this.repository.createSandbox({
-      id: sandboxId,
-      status: "pending",
-      gitSyncStatus: "pending",
-      createdAt: 0,
-    });
-
-    // Create owner participant with encrypted SCM token
-    const participantId = generateId();
-    this.repository.createParticipant({
-      id: participantId,
-      userId: body.userId,
-      scmLogin: body.scmLogin ?? null,
-      scmName: body.scmName ?? null,
-      scmEmail: body.scmEmail ?? null,
-      scmAccessTokenEncrypted: encryptedToken,
-      role: "owner",
-      joinedAt: now,
-    });
-
-    this.log.info("Triggering sandbox spawn for new session");
-    this.ctx.waitUntil(this.warmSandbox());
-
-    return Response.json({ sessionId, status: "created" });
-  }
-
-  private handleGetState(): Response {
-    const session = this.getSession();
-    if (!session) {
-      return new Response("Session not found", { status: 404 });
-    }
-
-    const sandbox = this.getSandbox();
-
-    return Response.json({
-      id: this.getPublicSessionId(session),
-      title: session.title,
-      repoOwner: session.repo_owner,
-      repoName: session.repo_name,
-      baseBranch: session.base_branch,
-      branchName: session.branch_name,
-      baseSha: session.base_sha,
-      currentSha: session.current_sha,
-      opencodeSessionId: session.opencode_session_id,
-      status: session.status,
-      mode: session.mode,
-      model: session.model,
-      reasoningEffort: session.reasoning_effort ?? undefined,
-      createdAt: session.created_at,
-      updatedAt: session.updated_at,
-      sandbox: sandbox
-        ? {
-            id: sandbox.id,
-            modalSandboxId: sandbox.modal_sandbox_id,
-            status: sandbox.status,
-            gitSyncStatus: sandbox.git_sync_status,
-            lastHeartbeat: sandbox.last_heartbeat,
-          }
-        : null,
-    });
-  }
-
-  private async handleSandboxEvent(request: Request): Promise<Response> {
-    const event = (await request.json()) as SandboxEvent;
-    await this.processSandboxEvent(event);
-    return Response.json({ status: "ok" });
-  }
-
-  private handleListParticipants(): Response {
-    const participants = this.repository.listParticipants();
-
-    return Response.json({
-      participants: participants.map((p) => ({
-        id: p.id,
-        userId: p.user_id,
-        scmLogin: p.scm_login,
-        scmName: p.scm_name,
-        role: p.role,
-        joinedAt: p.joined_at,
-      })),
-    });
-  }
-
-  private async handleAddParticipant(request: Request): Promise<Response> {
-    const body = (await request.json()) as {
-      userId: string;
-      scmLogin?: string;
-      scmName?: string;
-      scmEmail?: string;
-      role?: string;
-    };
-
-    const id = generateId();
-    const now = Date.now();
-
-    this.repository.createParticipant({
-      id,
-      userId: body.userId,
-      scmLogin: body.scmLogin ?? null,
-      scmName: body.scmName ?? null,
-      scmEmail: body.scmEmail ?? null,
-      role: (body.role ?? "member") as ParticipantRole,
-      joinedAt: now,
-    });
-
-    return Response.json({ id, status: "added" });
-  }
-
-  /**
-   * Handle PR creation request.
-   * Resolves prompting participant and auth in DO, then delegates PR orchestration.
-   */
-  private async handleCreatePR(request: Request): Promise<Response> {
-    const body = (await request.json()) as {
-      title: string;
-      body: string;
-      baseBranch?: string;
-      headBranch?: string;
-    };
-
-    const session = this.getSession();
-    if (!session) {
-      return Response.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    const promptingParticipantResult = await this.participantService.getPromptingParticipantForPR();
-    if (!promptingParticipantResult.participant) {
-      return Response.json(
-        { error: promptingParticipantResult.error },
-        { status: promptingParticipantResult.status }
-      );
-    }
-
-    const promptingParticipant = promptingParticipantResult.participant;
-    const authResolution = await this.participantService.resolveAuthForPR(promptingParticipant);
-    if ("error" in authResolution) {
-      return Response.json({ error: authResolution.error }, { status: authResolution.status });
-    }
-
-    const sessionId = session.session_name || session.id;
-    const webAppUrl = this.env.WEB_APP_URL || this.env.WORKER_URL || "";
-    const sessionUrl = webAppUrl + "/session/" + sessionId;
-
-    const pullRequestService = new SessionPullRequestService({
-      repository: this.repository,
-      sourceControlProvider: this.sourceControlProvider,
-      log: this.log,
-      generateId: () => generateId(),
-      pushBranchToRemote: (headBranch, pushSpec) => this.pushBranchToRemote(headBranch, pushSpec),
-      broadcastArtifactCreated: (artifact) => {
-        this.broadcast({
-          type: "artifact_created",
-          artifact,
-        });
-      },
-    });
-
-    const result = await pullRequestService.createPullRequest({
-      ...body,
-      baseBranch: body.baseBranch || session.base_branch,
-      promptingUserId: promptingParticipant.user_id,
-      promptingAuth: authResolution.auth,
-      sessionUrl,
-    });
-
-    if (result.kind === "error") {
-      return Response.json({ error: result.error }, { status: result.status });
-    }
-
-    return Response.json({
-      prNumber: result.prNumber,
-      prUrl: result.prUrl,
-      state: result.state,
-    });
-  }
-
   private parseArtifactMetadata(
     artifact: Pick<ArtifactRow, "id" | "metadata">
   ): Record<string, unknown> | null {
@@ -1948,292 +1787,5 @@ export class SessionDO extends DurableObject<Env> {
       });
       return null;
     }
-  }
-
-  /**
-   * Generate a WebSocket authentication token for a participant.
-   *
-   * This endpoint:
-   * 1. Creates or updates a participant record
-   * 2. Generates a 256-bit random token
-   * 3. Stores the SHA-256 hash in the participant record
-   * 4. Optionally stores encrypted SCM token for PR creation
-   * 5. Returns the plain token to the caller
-   */
-  private async handleGenerateWsToken(request: Request): Promise<Response> {
-    const body = (await request.json()) as {
-      userId: string;
-      scmUserId?: string;
-      scmLogin?: string;
-      scmName?: string;
-      scmEmail?: string;
-      scmTokenEncrypted?: string | null; // Encrypted SCM OAuth token for PR creation
-      scmRefreshTokenEncrypted?: string | null; // Encrypted SCM OAuth refresh token
-      scmTokenExpiresAt?: number | null; // Token expiry timestamp in milliseconds
-    };
-
-    if (!body.userId) {
-      return Response.json({ error: "userId is required" }, { status: 400 });
-    }
-
-    const now = Date.now();
-
-    // Check if participant exists
-    let participant = this.participantService.getByUserId(body.userId);
-
-    if (participant) {
-      // Only accept client tokens if they're newer than what we have in the DB.
-      // The server-side refresh may have rotated tokens, and the client could
-      // be sending stale values from an old session cookie.
-      const clientExpiresAt = body.scmTokenExpiresAt ?? null;
-      const dbExpiresAt = participant.scm_token_expires_at;
-      const clientSentAnyToken =
-        body.scmTokenEncrypted != null || body.scmRefreshTokenEncrypted != null;
-
-      const shouldUpdateTokens =
-        clientSentAnyToken &&
-        (dbExpiresAt == null || (clientExpiresAt != null && clientExpiresAt > dbExpiresAt));
-
-      // If we already have a refresh token (server-side refresh may rotate it),
-      // only accept an incoming refresh token when we're also accepting the
-      // access token update, or when we don't have one yet.
-      const shouldUpdateRefreshToken =
-        body.scmRefreshTokenEncrypted != null &&
-        (participant.scm_refresh_token_encrypted == null || shouldUpdateTokens);
-
-      this.repository.updateParticipantCoalesce(participant.id, {
-        scmUserId: body.scmUserId ?? null,
-        scmLogin: body.scmLogin ?? null,
-        scmName: body.scmName ?? null,
-        scmEmail: body.scmEmail ?? null,
-        scmAccessTokenEncrypted: shouldUpdateTokens ? (body.scmTokenEncrypted ?? null) : null,
-        scmRefreshTokenEncrypted: shouldUpdateRefreshToken
-          ? (body.scmRefreshTokenEncrypted ?? null)
-          : null,
-        scmTokenExpiresAt: shouldUpdateTokens ? clientExpiresAt : null,
-      });
-    } else {
-      // Create new participant with optional SCM token
-      const id = generateId();
-      this.repository.createParticipant({
-        id,
-        userId: body.userId,
-        scmUserId: body.scmUserId ?? null,
-        scmLogin: body.scmLogin ?? null,
-        scmName: body.scmName ?? null,
-        scmEmail: body.scmEmail ?? null,
-        scmAccessTokenEncrypted: body.scmTokenEncrypted ?? null,
-        scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
-        scmTokenExpiresAt: body.scmTokenExpiresAt ?? null,
-        role: "member",
-        joinedAt: now,
-      });
-      participant = this.participantService.getByUserId(body.userId)!;
-    }
-
-    // Generate a new WebSocket token (32 bytes = 256 bits)
-    const plainToken = generateId(32);
-    const tokenHash = await hashToken(plainToken);
-
-    // Store the hash (invalidates any previous token)
-    this.repository.updateParticipantWsToken(participant.id, tokenHash, now);
-
-    this.log.info("Generated WS token", { participant_id: participant.id, user_id: body.userId });
-
-    return Response.json({
-      token: plainToken,
-      participantId: participant.id,
-    });
-  }
-
-  /**
-   * Handle archive session request.
-   * Only session participants are authorized to archive.
-   */
-  private async handleArchive(request: Request): Promise<Response> {
-    const session = this.getSession();
-    if (!session) {
-      return Response.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    // Verify user is a participant (fail closed)
-    let body: { userId?: string };
-    try {
-      body = (await request.json()) as { userId?: string };
-    } catch {
-      return Response.json({ error: "Invalid request body" }, { status: 400 });
-    }
-
-    if (!body.userId) {
-      return Response.json({ error: "userId is required" }, { status: 400 });
-    }
-
-    const participant = this.participantService.getByUserId(body.userId);
-    if (!participant) {
-      return Response.json({ error: "Not authorized to archive this session" }, { status: 403 });
-    }
-
-    await this.transitionSessionStatus("archived");
-
-    return Response.json({ status: "archived" });
-  }
-
-  /**
-   * Handle unarchive session request.
-   * Only session participants are authorized to unarchive.
-   */
-  private async handleUnarchive(request: Request): Promise<Response> {
-    const session = this.getSession();
-    if (!session) {
-      return Response.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    // Verify user is a participant (fail closed)
-    let body: { userId?: string };
-    try {
-      body = (await request.json()) as { userId?: string };
-    } catch {
-      return Response.json({ error: "Invalid request body" }, { status: 400 });
-    }
-
-    if (!body.userId) {
-      return Response.json({ error: "userId is required" }, { status: 400 });
-    }
-
-    const participant = this.participantService.getByUserId(body.userId);
-    if (!participant) {
-      return Response.json({ error: "Not authorized to unarchive this session" }, { status: 403 });
-    }
-
-    await this.transitionSessionStatus("active");
-
-    return Response.json({ status: "active" });
-  }
-
-  // --- Sub-session (child) internal handlers ---
-
-  private handleGetSpawnContext(): Response {
-    const session = this.getSession();
-    if (!session) {
-      return Response.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    const participants = this.repository.listParticipants();
-    const owner = participants.find((p) => p.role === "owner");
-    if (!owner) {
-      return Response.json({ error: "No owner participant found" }, { status: 404 });
-    }
-
-    const context: SpawnContext = {
-      repoOwner: session.repo_owner,
-      repoName: session.repo_name,
-      repoId: session.repo_id,
-      model: session.model,
-      reasoningEffort: session.reasoning_effort,
-      mode: session.mode,
-      sandboxProvider: session.sandbox_provider as "modal" | "helm" | "ec2" | null,
-      owner: {
-        userId: owner.user_id,
-        scmLogin: owner.scm_login,
-        scmName: owner.scm_name,
-        scmEmail: owner.scm_email,
-        scmAccessTokenEncrypted: owner.scm_access_token_encrypted,
-        scmRefreshTokenEncrypted: owner.scm_refresh_token_encrypted,
-        scmTokenExpiresAt: owner.scm_token_expires_at,
-      },
-    };
-
-    return Response.json(context);
-  }
-
-  private handleGetChildSummary(): Response {
-    const session = this.getSession();
-    if (!session) {
-      return Response.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    const sandbox = this.getSandbox();
-    const artifacts = this.repository.listArtifacts();
-    const allEvents = this.repository.listEvents({ limit: 50 });
-
-    // Filter out noisy event types, take first 5
-    const filteredTypes = new Set(["token", "heartbeat", "step_start", "step_finish"]);
-    const recentEvents = allEvents.filter((e) => !filteredTypes.has(e.type)).slice(0, 5);
-
-    const detail = {
-      session: {
-        id: this.getPublicSessionId(session),
-        title: session.title ?? "",
-        status: session.status,
-        repoOwner: session.repo_owner,
-        repoName: session.repo_name,
-        branchName: session.branch_name,
-        model: session.model,
-        createdAt: session.created_at,
-        updatedAt: session.updated_at,
-      },
-      sandbox: sandbox ? { status: sandbox.status } : null,
-      artifacts: artifacts.map((a) => ({
-        type: a.type,
-        url: a.url ?? "",
-        metadata: a.metadata ? JSON.parse(a.metadata) : null,
-      })),
-      recentEvents: recentEvents.map((e) => ({
-        type: e.type,
-        data: JSON.parse(e.data),
-        createdAt: e.created_at,
-      })),
-    };
-
-    return Response.json(detail);
-  }
-
-  private async handleChildSessionUpdate(request: Request): Promise<Response> {
-    const body = (await request.json()) as {
-      childSessionId: string;
-      status: SessionStatus;
-      title: string | null;
-    };
-
-    if (!body.childSessionId || !body.status) {
-      return Response.json({ error: "childSessionId and status are required" }, { status: 400 });
-    }
-
-    this.broadcast({
-      type: "child_session_update",
-      childSessionId: body.childSessionId,
-      status: body.status,
-      title: body.title ?? null,
-    });
-
-    return Response.json({ ok: true });
-  }
-
-  private async handleCancel(): Promise<Response> {
-    const session = this.getSession();
-    if (!session) {
-      return Response.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    if (TERMINAL_STATUSES.has(session.status)) {
-      return Response.json({ error: `Session already ${session.status}` }, { status: 409 });
-    }
-
-    // Stop any in-flight message processing without emitting intermediate "failed".
-    await this.stopExecution({ suppressStatusReconcile: true });
-
-    await this.transitionSessionStatus("cancelled");
-
-    // Stop sandbox if running
-    const sandbox = this.getSandbox();
-    if (sandbox && sandbox.status !== "stopped" && sandbox.status !== "failed") {
-      const sandboxWs = this.wsManager.getSandboxSocket();
-      if (sandboxWs) {
-        this.wsManager.send(sandboxWs, { type: "shutdown" });
-      }
-      this.updateSandboxStatus("stopped");
-    }
-
-    return Response.json({ status: "cancelled" });
   }
 }

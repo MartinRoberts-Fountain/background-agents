@@ -26,10 +26,6 @@ from .log_config import configure_logging, get_logger
 configure_logging()
 
 
-class StartupInterruptedError(RuntimeError):
-    """Raised when startup is interrupted by an intentional shutdown signal."""
-
-
 class SandboxSupervisor:
     """
     Supervisor process for sandbox lifecycle management.
@@ -51,6 +47,8 @@ class SandboxSupervisor:
     START_SCRIPT_PATH = ".openinspect/start.sh"
     DEFAULT_SETUP_TIMEOUT_SECONDS = 300
     DEFAULT_START_TIMEOUT_SECONDS = 120
+    CLONE_DEPTH_COMMITS = 100
+    PROXY_SCRIPT_PATH = "/app/sandbox/proxy.mjs"
 
     def __init__(self):
         self.opencode_process: asyncio.subprocess.Process | None = None
@@ -76,7 +74,6 @@ class SandboxSupervisor:
         # Parse session config if provided
         session_config_json = os.environ.get("SESSION_CONFIG", "{}")
         self.session_config = json.loads(session_config_json)
-        self.session_id = self._resolve_session_id()
 
         # Paths
         self.workspace_path = Path("/workspace")
@@ -84,20 +81,13 @@ class SandboxSupervisor:
         self.session_id_file = Path("/tmp/opencode-session-id")
 
         # Logger
+        session_id = self.session_config.get("session_id", "")
         self.log = get_logger(
             "supervisor",
             service="sandbox",
             sandbox_id=self.sandbox_id,
-            session_id=self.session_id,
+            session_id=session_id,
         )
-
-    def _resolve_session_id(self) -> str:
-        """Resolve session ID across known naming variants."""
-        # Prefer SESSION_CONFIG values, but fall back to top-level env for robustness.
-        session_id = self.session_config.get("session_id") or self.session_config.get("sessionId")
-        if session_id:
-            return str(session_id)
-        return os.environ.get("SESSION_ID", "")
 
     @property
     def base_branch(self) -> str:
@@ -110,20 +100,140 @@ class SandboxSupervisor:
             return f"https://{self.vcs_clone_username}:{self.vcs_clone_token}@{self.vcs_host}/{self.repo_owner}/{self.repo_name}.git"
         return f"https://{self.vcs_host}/{self.repo_owner}/{self.repo_name}.git"
 
-    @staticmethod
-    def _tail_text(data: bytes | None, max_lines: int = 50) -> str:
-        """Decode bytes and return the last N lines for safe diagnostic logging."""
-        if not data:
-            return ""
-        text = data.decode(errors="replace")
-        return "\n".join(text.splitlines()[-max_lines:])
+    # ------------------------------------------------------------------
+    # Git primitives
+    # ------------------------------------------------------------------
+
+    async def _clone_repo(self) -> bool:
+        """Shallow-clone the repository."""
+        self.log.info(
+            "git.clone_start",
+            repo_owner=self.repo_owner,
+            repo_name=self.repo_name,
+            authenticated=bool(self.vcs_clone_token),
+        )
+
+        clone_depth = self.CLONE_DEPTH_COMMITS if self.boot_mode == "build" else 1
+        result = await asyncio.create_subprocess_exec(
+            "git",
+            "clone",
+            "--depth",
+            str(clone_depth),
+            "--branch",
+            self.base_branch,
+            self._build_repo_url(),
+            str(self.repo_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await result.communicate()
+
+        if result.returncode != 0:
+            self.log.error(
+                "git.clone_error",
+                stderr=stderr.decode(),
+                exit_code=result.returncode,
+            )
+            return False
+
+        self.log.info("git.clone_complete", repo_path=str(self.repo_path))
+        return True
+
+    async def _ensure_remote_auth(self) -> None:
+        """Set the remote URL with auth credentials if a clone token is available."""
+        if not self.vcs_clone_token:
+            return
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            self._build_repo_url(),
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            self.log.warn("git.set_url_failed", exit_code=proc.returncode, stderr=stderr.decode())
+
+    async def _fetch_branch(self, branch: str) -> bool:
+        """Fetch a branch with an explicit refspec.
+
+        Uses an explicit refspec so that ``refs/remotes/origin/<branch>`` is
+        created even in shallow or single-branch clones.
+        """
+        result = await asyncio.create_subprocess_exec(
+            "git",
+            "fetch",
+            "origin",
+            f"{branch}:refs/remotes/origin/{branch}",
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await result.communicate()
+        if result.returncode != 0:
+            self.log.error(
+                "git.fetch_error",
+                stderr=stderr.decode(),
+                exit_code=result.returncode,
+            )
+            return False
+        return True
+
+    async def _checkout_branch(self, branch: str) -> bool:
+        """Create/reset a local branch to match the remote tip."""
+        result = await asyncio.create_subprocess_exec(
+            "git",
+            "checkout",
+            "-B",
+            branch,
+            f"origin/{branch}",
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await result.communicate()
+        if result.returncode != 0:
+            self.log.warn(
+                "git.checkout_error",
+                stderr=stderr.decode(),
+                exit_code=result.returncode,
+                target_branch=branch,
+            )
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Git sync methods (compose the primitives above)
+    # ------------------------------------------------------------------
+
+    async def _update_existing_repo(self) -> bool:
+        """Fetch the target branch and check it out in an existing repo.
+
+        Used by both snapshot-restore and repo-image boot paths where the
+        repository already exists on disk.
+        """
+        if not self.repo_path.exists():
+            self.log.info("git.update_skip", reason="no_repo_path")
+            return False
+
+        try:
+            await self._ensure_remote_auth()
+            branch = self.base_branch
+            if not await self._fetch_branch(branch):
+                return False
+            return await self._checkout_branch(branch)
+        except Exception as e:
+            self.log.error("git.update_error", exc=e)
+            return False
 
     async def perform_git_sync(self) -> bool:
-        """
-        Clone repository if needed, then synchronize with latest changes.
+        """Clone repository if needed, then sync to the target branch.
 
         Returns:
-            True if sync completed successfully, False otherwise
+            True if sync completed successfully, False otherwise.
         """
         self.log.debug(
             "git.sync_start",
@@ -133,175 +243,14 @@ class SandboxSupervisor:
             has_clone_token=bool(self.vcs_clone_token),
         )
 
-        # Clone the repository if it doesn't exist
         if not self.repo_path.exists():
             if not self.repo_owner or not self.repo_name:
                 self.log.info("git.skip_clone", reason="no_repo_configured")
-                self.git_sync_complete.set()
                 return True
-
-            self.log.info(
-                "git.clone_start",
-                repo_owner=self.repo_owner,
-                repo_name=self.repo_name,
-                authenticated=bool(self.vcs_clone_token),
-            )
-
-            clone_url = self._build_repo_url()
-            image_build_mode = os.environ.get("IMAGE_BUILD_MODE") == "true"
-            clone_depth = "100" if image_build_mode else "1"
-            base_branch = self.base_branch
-
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "clone",
-                "--depth",
-                clone_depth,
-                "--branch",
-                base_branch,
-                clone_url,
-                str(self.repo_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await result.communicate()
-
-            if result.returncode != 0:
-                self.log.error(
-                    "git.clone_error",
-                    stderr=stderr.decode(),
-                    exit_code=result.returncode,
-                )
-                self.git_sync_complete.set()
+            if not await self._clone_repo():
                 return False
 
-            self.log.info("git.clone_complete", repo_path=str(self.repo_path))
-
-        try:
-            # Configure remote URL with auth token if available
-            if self.vcs_clone_token:
-                await asyncio.create_subprocess_exec(
-                    "git",
-                    "remote",
-                    "set-url",
-                    "origin",
-                    self._build_repo_url(),
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-
-            # Fetch latest changes for the target branch
-            base_branch = self.base_branch
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "fetch",
-                "origin",
-                base_branch,
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await result.wait()
-
-            if result.returncode != 0:
-                stderr = await result.stderr.read() if result.stderr else b""
-                self.log.error(
-                    "git.fetch_error",
-                    stderr=stderr.decode(),
-                    exit_code=result.returncode,
-                )
-                return False
-
-            # Rebase onto latest
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "rebase",
-                f"origin/{base_branch}",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            rebase_stdout, rebase_stderr = await result.communicate()
-
-            if result.returncode != 0:
-                # Check if there's actually a rebase in progress before trying to abort
-                rebase_merge = self.repo_path / ".git" / "rebase-merge"
-                rebase_apply = self.repo_path / ".git" / "rebase-apply"
-                rebase_in_progress = rebase_merge.exists() or rebase_apply.exists()
-
-                branch_cmd = await asyncio.create_subprocess_exec(
-                    "git",
-                    "rev-parse",
-                    "--abbrev-ref",
-                    "HEAD",
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                branch_stdout, _ = await branch_cmd.communicate()
-                current_branch = branch_stdout.decode(errors="replace").strip()
-
-                status_cmd = await asyncio.create_subprocess_exec(
-                    "git",
-                    "status",
-                    "--porcelain=v1",
-                    "--branch",
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                status_stdout, _ = await status_cmd.communicate()
-
-                abort_exit_code = None
-                abort_output_tail = ""
-                if rebase_in_progress:
-                    abort_result = await asyncio.create_subprocess_exec(
-                        "git",
-                        "rebase",
-                        "--abort",
-                        cwd=self.repo_path,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    abort_stdout, abort_stderr = await abort_result.communicate()
-                    abort_exit_code = abort_result.returncode
-                    abort_output_tail = self._tail_text(abort_stdout) or self._tail_text(
-                        abort_stderr
-                    )
-
-                self.log.error(
-                    "git.rebase_error",
-                    base_branch=base_branch,
-                    current_branch=current_branch,
-                    exit_code=result.returncode,
-                    rebase_in_progress=rebase_in_progress,
-                    rebase_stdout_tail=self._tail_text(rebase_stdout),
-                    rebase_stderr_tail=self._tail_text(rebase_stderr),
-                    status_tail=self._tail_text(status_stdout),
-                    abort_exit_code=abort_exit_code,
-                    abort_output_tail=abort_output_tail,
-                )
-
-            # Get current SHA
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "rev-parse",
-                "HEAD",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await result.communicate()
-            current_sha = stdout.decode().strip()
-            self.log.info("git.sync_complete", head_sha=current_sha)
-
-            self.git_sync_complete.set()
-            return True
-
-        except Exception as e:
-            self.log.error("git.sync_error", exc=e)
-            self.git_sync_complete.set()  # Allow agent to proceed anyway
-            return False
+        return await self._update_existing_repo()
 
     def _install_tools(self, workdir: Path) -> None:
         """Copy custom tools into the .opencode/tool directory for OpenCode to discover."""
@@ -462,76 +411,40 @@ class SandboxSupervisor:
         """Poll health endpoint until server is ready."""
         health_url = f"http://localhost:{self.OPENCODE_PORT}/global/health"
         start_time = time.time()
-        attempts = 0
-        connect_error_count = 0
-        last_error = ""
 
         async with httpx.AsyncClient() as client:
             while time.time() - start_time < self.HEALTH_CHECK_TIMEOUT:
                 if self.shutdown_event.is_set():
-                    raise StartupInterruptedError("Shutdown requested during startup")
+                    raise RuntimeError("Shutdown requested during startup")
 
                 try:
-                    attempts += 1
                     resp = await client.get(health_url, timeout=2.0)
                     if resp.status_code == 200:
                         return
-                    last_error = f"unexpected_status:{resp.status_code}"
-                    if attempts % 5 == 0:
-                        elapsed_ms = int((time.time() - start_time) * 1000)
-                        self.log.debug(
-                            "opencode.health_check_retry",
-                            attempts=attempts,
-                            elapsed_ms=elapsed_ms,
-                            status_code=resp.status_code,
-                        )
                 except httpx.ConnectError:
-                    connect_error_count += 1
-                    last_error = "connect_error"
-                    # Log every 5th connect failure to keep noise manageable.
-                    if connect_error_count % 5 == 0:
-                        elapsed_ms = int((time.time() - start_time) * 1000)
-                        self.log.debug(
-                            "opencode.health_check_connect_error",
-                            attempts=attempts,
-                            connect_error_count=connect_error_count,
-                            elapsed_ms=elapsed_ms,
-                            health_url=health_url,
-                        )
+                    pass
                 except Exception as e:
                     self.log.debug("opencode.health_check_error", exc=e)
 
                 await asyncio.sleep(0.5)
 
-        raise RuntimeError(
-            "OpenCode server failed to become healthy "
-            f"(attempts={attempts}, connect_errors={connect_error_count}, last_error={last_error})"
-        )
+        raise RuntimeError("OpenCode server failed to become healthy")
 
     async def start_bridge(self) -> None:
         """Start the agent bridge process."""
         self.log.info("bridge.start")
 
         if not self.control_plane_url:
-            self.log.info(
-                "bridge.skip",
-                reason="no_control_plane_url",
-                has_sandbox_token=bool(self.sandbox_token),
-            )
+            self.log.info("bridge.skip", reason="no_control_plane_url")
             return
 
         # Wait for OpenCode to be ready
         await self.opencode_ready.wait()
 
-        # Get session_id (required for WebSocket connection)
-        session_id = self.session_id
+        # Get session_id from config (required for WebSocket connection)
+        session_id = self.session_config.get("session_id", "")
         if not session_id:
-            self.log.info(
-                "bridge.skip",
-                reason="no_session_id",
-                control_plane_url=self.control_plane_url,
-                has_sandbox_token=bool(self.sandbox_token),
-            )
+            self.log.info("bridge.skip", reason="no_session_id")
             return
 
         # Run bridge as a module (works with relative imports)
@@ -570,10 +483,7 @@ class SandboxSupervisor:
                 self.log.error(
                     "bridge.startup_crash",
                     exit_code=exit_code,
-                    output_tail=self._tail_text(stdout),
-                    control_plane_url=self.control_plane_url,
-                    has_sandbox_token=bool(self.sandbox_token),
-                    session_id=session_id,
+                    output=stdout.decode() if stdout else "",
                 )
 
     async def _forward_bridge_logs(self) -> None:
@@ -589,41 +499,19 @@ class SandboxSupervisor:
             print(f"[supervisor] Bridge log forwarding error: {e}")
 
     async def start_proxy(self) -> None:
-        """Start the reverse proxy process."""
-        self.log.info("proxy.start")
-
-        # Find proxy.mjs - either in same dir or /app/sandbox/
-        proxy_path = Path(__file__).parent / "proxy.mjs"
+        """Start the proxy process."""
+        proxy_path = Path(self.PROXY_SCRIPT_PATH)
         if not proxy_path.exists():
-            proxy_path = Path("/app/sandbox/proxy.mjs")
-
-        if not proxy_path.exists():
-            self.log.error("proxy.not_found", path=str(proxy_path))
+            self.log.info("proxy.skip", reason="no_proxy_script")
             return
 
         self.proxy_process = await asyncio.create_subprocess_exec(
             "node",
             str(proxy_path),
-            env=os.environ,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-
-        # Start log forwarder for proxy
-        asyncio.create_task(self._forward_proxy_logs())
         self.log.info("proxy.started")
-
-    async def _forward_proxy_logs(self) -> None:
-        """Forward proxy stdout to supervisor stdout."""
-        if not self.proxy_process or not self.proxy_process.stdout:
-            return
-
-        try:
-            async for line in self.proxy_process.stdout:
-                # Proxy already prefixes its output with [reverse-proxy], don't double it
-                print(line.decode().rstrip())
-        except Exception as e:
-            print(f"[supervisor] Proxy log forwarding error: {e}")
 
     async def monitor_processes(self) -> None:
         """Monitor child processes and restart on crash."""
@@ -632,6 +520,27 @@ class SandboxSupervisor:
         proxy_restart_count = 0
 
         while not self.shutdown_event.is_set():
+            # Check proxy process
+            if self.proxy_process and self.proxy_process.returncode is not None:
+                exit_code = self.proxy_process.returncode
+                proxy_restart_count += 1
+
+                self.log.error(
+                    "proxy.crash", exit_code=exit_code, restart_count=proxy_restart_count
+                )
+
+                if proxy_restart_count > self.MAX_RESTARTS:
+                    self.log.error("proxy.max_restarts", restart_count=proxy_restart_count)
+                    await self._report_fatal_error(
+                        f"Proxy crashed {proxy_restart_count} times, giving up"
+                    )
+                    self.shutdown_event.set()
+                    break
+
+                delay = min(self.BACKOFF_BASE**proxy_restart_count, self.BACKOFF_MAX)
+                await asyncio.sleep(delay)
+                await self.start_proxy()
+
             # Check OpenCode process
             if self.opencode_process and self.opencode_process.returncode is not None:
                 exit_code = self.opencode_process.returncode
@@ -708,67 +617,23 @@ class SandboxSupervisor:
                     await asyncio.sleep(delay)
                     await self.start_bridge()
 
-            # Check proxy process
-            if self.proxy_process and self.proxy_process.returncode is not None:
-                exit_code = self.proxy_process.returncode
-                proxy_restart_count += 1
-
-                self.log.error(
-                    "proxy.crash",
-                    exit_code=exit_code,
-                    restart_count=proxy_restart_count,
-                )
-
-                if proxy_restart_count > self.MAX_RESTARTS:
-                    self.log.error(
-                        "proxy.max_restarts",
-                        restart_count=proxy_restart_count,
-                    )
-                    await self._report_fatal_error(
-                        f"Proxy crashed {proxy_restart_count} times, giving up"
-                    )
-                    self.shutdown_event.set()
-                    break
-
-                delay = min(self.BACKOFF_BASE**proxy_restart_count, self.BACKOFF_MAX)
-                self.log.info(
-                    "proxy.restart",
-                    delay_s=round(delay, 1),
-                    restart_count=proxy_restart_count,
-                )
-                await asyncio.sleep(delay)
-                await self.start_proxy()
-
             await asyncio.sleep(1.0)
 
     async def _report_fatal_error(self, message: str) -> None:
         """Report a fatal error to the control plane."""
-        # "message" is a reserved LogRecord field; use a custom key.
-        self.log.error("supervisor.fatal", fatal_error=message)
+        self.log.error("supervisor.fatal", message=message)
 
         if not self.control_plane_url:
             return
 
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(
+                await client.post(
                     f"{self.control_plane_url}/sandbox/{self.sandbox_id}/error",
                     json={"error": message, "fatal": True},
                     headers={"Authorization": f"Bearer {self.sandbox_token}"},
                     timeout=5.0,
                 )
-                if response.status_code >= 400:
-                    self.log.error(
-                        "supervisor.report_error_rejected",
-                        status_code=response.status_code,
-                        response_body=self._tail_text(response.text.encode(), max_lines=20),
-                        has_sandbox_token=bool(self.sandbox_token),
-                    )
-                else:
-                    self.log.info(
-                        "supervisor.report_error_sent",
-                        status_code=response.status_code,
-                    )
         except Exception as e:
             self.log.error("supervisor.report_error_failed", exc=e)
 
@@ -912,165 +777,6 @@ class SandboxSupervisor:
             default_timeout_seconds=self.DEFAULT_START_TIMEOUT_SECONDS,
         )
 
-    async def _quick_git_fetch(self) -> None:
-        """
-        Quick fetch to check if we're behind after snapshot restore.
-
-        When restored from a snapshot, the workspace already has all changes.
-        This just checks if the remote has new commits since the snapshot.
-        """
-        if not self.repo_path.exists():
-            self.log.info("git.quick_fetch_skip", reason="no_repo_path")
-            return
-
-        try:
-            # Configure remote URL with auth token if available
-            if self.vcs_clone_token:
-                await asyncio.create_subprocess_exec(
-                    "git",
-                    "remote",
-                    "set-url",
-                    "origin",
-                    self._build_repo_url(),
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-
-            # Fetch from origin
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "fetch",
-                "--quiet",
-                "origin",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await result.communicate()
-
-            if result.returncode != 0:
-                self.log.warn(
-                    "git.quick_fetch_error",
-                    stderr=stderr.decode(),
-                    exit_code=result.returncode,
-                )
-                return
-
-            # Check if we're behind the remote
-            # Get the current branch
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "rev-parse",
-                "--abbrev-ref",
-                "HEAD",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await result.communicate()
-            current_branch = stdout.decode().strip()
-
-            # Check if we have an upstream set
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "rev-list",
-                "--count",
-                f"HEAD..origin/{current_branch}",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await result.communicate()
-
-            if result.returncode == 0:
-                commits_behind = int(stdout.decode().strip() or "0")
-                self.log.info(
-                    "git.snapshot_status",
-                    commits_behind=commits_behind,
-                    current_branch=current_branch,
-                )
-            else:
-                self.log.debug("git.snapshot_status_unknown", reason="no_upstream")
-
-        except Exception as e:
-            self.log.error("git.quick_fetch_error", exc=e)
-
-    async def _incremental_git_sync(self) -> bool:
-        """
-        Fast git sync for repo-image starts. Repo already exists from the build,
-        just pull the latest commits (up to 30 minutes of drift).
-        """
-        if not self.repo_path.exists():
-            self.log.warn("git.incremental_sync_skip", reason="no_repo_path")
-            self.git_sync_complete.set()
-            return False
-
-        try:
-            # Update remote URL with fresh clone token
-            if self.vcs_clone_token:
-                set_url = await asyncio.create_subprocess_exec(
-                    "git",
-                    "remote",
-                    "set-url",
-                    "origin",
-                    self._build_repo_url(),
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                await set_url.communicate()
-                if set_url.returncode != 0:
-                    self.log.warn("git.set_url_failed", exit_code=set_url.returncode)
-
-            # Fetch latest for the target branch
-            base_branch = self.base_branch
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "fetch",
-                "origin",
-                base_branch,
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await result.communicate()
-
-            if result.returncode != 0:
-                self.log.error(
-                    "git.incremental_fetch_error",
-                    stderr=stderr.decode(),
-                    exit_code=result.returncode,
-                )
-                self.git_sync_complete.set()
-                return False
-            result = await asyncio.create_subprocess_exec(
-                "git",
-                "reset",
-                "--hard",
-                f"origin/{base_branch}",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await result.communicate()
-
-            if result.returncode != 0:
-                self.log.error(
-                    "git.incremental_reset_error",
-                    stderr=stderr.decode(),
-                    exit_code=result.returncode,
-                )
-
-            self.log.info("git.incremental_sync_complete")
-            self.git_sync_complete.set()
-            return True
-
-        except Exception as e:
-            self.log.error("git.incremental_sync_error", exc=e)
-            self.git_sync_complete.set()
-            return False
-
     async def run(self) -> None:
         """Main supervisor loop."""
         startup_start = time.time()
@@ -1116,13 +822,13 @@ class SandboxSupervisor:
         try:
             # Phase 1: Git sync
             if restored_from_snapshot:
-                await self._quick_git_fetch()
-                self.git_sync_complete.set()
+                await self._update_existing_repo()  # best-effort
                 git_sync_success = True
             elif from_repo_image:
-                git_sync_success = await self._incremental_git_sync()
+                git_sync_success = await self._update_existing_repo()
             else:
                 git_sync_success = await self.perform_git_sync()
+            self.git_sync_complete.set()
 
             # Phase 2: Run setup script only for fresh or build boots.
             setup_success: bool | None = None
@@ -1156,9 +862,6 @@ class SandboxSupervisor:
             # Phase 5: Start bridge (after OpenCode is ready)
             await self.start_bridge()
 
-            # Phase 6: Start reverse proxy
-            await self.start_proxy()
-
             # Emit sandbox.startup wide event
             duration_ms = int((time.time() - startup_start) * 1000)
             self.log.info(
@@ -1176,13 +879,9 @@ class SandboxSupervisor:
                 outcome="success",
             )
 
-            # Phase 7: Monitor processes
+            # Phase 6: Monitor processes
             await self.monitor_processes()
 
-        except StartupInterruptedError:
-            # A signal arrived while we were still booting; this is a normal
-            # shutdown path and should not be reported as a fatal sandbox error.
-            self.log.info("supervisor.startup_interrupted")
         except Exception as e:
             self.log.error("supervisor.error", exc=e)
             await self._report_fatal_error(str(e))
@@ -1199,7 +898,7 @@ class SandboxSupervisor:
         """Graceful shutdown of all processes."""
         self.log.info("supervisor.shutdown_start")
 
-        # Terminate proxy first
+        # Terminate proxy
         if self.proxy_process and self.proxy_process.returncode is None:
             self.proxy_process.terminate()
             try:
@@ -1207,7 +906,7 @@ class SandboxSupervisor:
             except TimeoutError:
                 self.proxy_process.kill()
 
-        # Terminate bridge
+        # Terminate bridge first
         if self.bridge_process and self.bridge_process.returncode is None:
             self.bridge_process.terminate()
             try:

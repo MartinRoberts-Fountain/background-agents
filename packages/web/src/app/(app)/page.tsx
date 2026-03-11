@@ -12,7 +12,9 @@ import {
   DEFAULT_MODEL,
   getDefaultReasoningEffort,
   isValidReasoningEffort,
+  SESSION_MODE_LABELS,
   type ModelCategory,
+  type SessionMode,
 } from "@open-inspect/shared";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
 import { useRepos, type Repo } from "@/hooks/use-repos";
@@ -26,12 +28,31 @@ import {
   ChevronDownIcon,
   SendIcon,
   SparkleIcon,
+  ServerIcon,
+  ModeIcon,
 } from "@/components/ui/icons";
 import { Combobox, type ComboboxGroup } from "@/components/ui/combobox";
 
 const LAST_SELECTED_REPO_STORAGE_KEY = "open-inspect-last-selected-repo";
 const LAST_SELECTED_MODEL_STORAGE_KEY = "open-inspect-last-selected-model";
 const LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY = "open-inspect-last-selected-reasoning-effort";
+const LAST_SELECTED_PROVIDER_STORAGE_KEY = "open-inspect-last-selected-provider";
+const LAST_SELECTED_MODE_STORAGE_KEY = "open-inspect-last-selected-mode";
+
+const MODE_OPTIONS: { value: SessionMode; label: string }[] = [
+  { value: "apply", label: SESSION_MODE_LABELS.apply },
+  { value: "plan", label: SESSION_MODE_LABELS.plan },
+  { value: "code_review", label: SESSION_MODE_LABELS.code_review },
+];
+
+type SandboxProvider = "modal" | "helm" | "ec2";
+
+const SANDBOX_PROVIDER_OPTIONS: { value: SandboxProvider | ""; label: string }[] = [
+  { value: "", label: "Auto" },
+  { value: "modal", label: "Modal" },
+  { value: "helm", label: "Kubernetes" },
+  { value: "ec2", label: "EC2" },
+];
 
 interface RepoPrimaryAgent {
   id: string;
@@ -49,6 +70,8 @@ export default function Home() {
   );
   const [selectedBranch, setSelectedBranch] = useState<string>("");
   const [selectedAgent, setSelectedAgent] = useState<string>("");
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
+  const [selectedMode, setSelectedMode] = useState<SessionMode>("apply");
   const [prompt, setPrompt] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
@@ -56,7 +79,7 @@ export default function Home() {
   const [isCreatingSession, setIsCreatingSession] = useState(false);
   const sessionCreationPromise = useRef<Promise<string | null> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const pendingConfigRef = useRef<{ repo: string; model: string } | null>(null);
+  const pendingConfigRef = useRef<{ repo: string; model: string; branch: string } | null>(null);
   const hasHydratedModelPreferences = useRef(false);
   const { enabledModels, enabledModelOptions } = useEnabledModels();
   const selectedRepoOwner = selectedRepo.split("/")[0] ?? "";
@@ -111,6 +134,16 @@ export default function Home() {
         ? storedReasoningEffort
         : getDefaultReasoningEffort(selectedModelFromStorage);
 
+    const storedProvider = localStorage.getItem(LAST_SELECTED_PROVIDER_STORAGE_KEY);
+    if (storedProvider && ["modal", "helm", "ec2"].includes(storedProvider)) {
+      setSelectedProvider(storedProvider);
+    }
+
+    const storedMode = localStorage.getItem(LAST_SELECTED_MODE_STORAGE_KEY);
+    if (storedMode && ["plan", "apply", "code_review"].includes(storedMode)) {
+      setSelectedMode(storedMode as SessionMode);
+    }
+
     setSelectedModel(selectedModelFromStorage);
     setReasoningEffort(reasoningEffortFromStorage);
     hasHydratedModelPreferences.current = true;
@@ -127,6 +160,20 @@ export default function Home() {
 
     localStorage.removeItem(LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY);
   }, [selectedModel, reasoningEffort]);
+
+  useEffect(() => {
+    if (!hasHydratedModelPreferences.current) return;
+    if (selectedProvider) {
+      localStorage.setItem(LAST_SELECTED_PROVIDER_STORAGE_KEY, selectedProvider);
+    } else {
+      localStorage.removeItem(LAST_SELECTED_PROVIDER_STORAGE_KEY);
+    }
+  }, [selectedProvider]);
+
+  useEffect(() => {
+    if (!hasHydratedModelPreferences.current) return;
+    localStorage.setItem(LAST_SELECTED_MODE_STORAGE_KEY, selectedMode);
+  }, [selectedMode]);
 
   useEffect(() => {
     if (defaultAgentData && selectedRepoOwner && selectedRepoName) {
@@ -147,7 +194,7 @@ export default function Home() {
     setIsCreatingSession(false);
     sessionCreationPromise.current = null;
     pendingConfigRef.current = null;
-  }, [selectedRepo, selectedModel, selectedBranch]);
+  }, [selectedRepo, selectedModel, selectedBranch, selectedProvider, selectedMode]);
 
   const createSessionForWarming = useCallback(async () => {
     if (pendingSessionId) return pendingSessionId;
@@ -156,7 +203,7 @@ export default function Home() {
 
     setIsCreatingSession(true);
     const [owner, name] = selectedRepo.split("/");
-    const currentConfig = { repo: selectedRepo, model: selectedModel };
+    const currentConfig = { repo: selectedRepo, model: selectedModel, branch: selectedBranch };
     pendingConfigRef.current = currentConfig;
 
     const abortController = new AbortController();
@@ -174,6 +221,8 @@ export default function Home() {
             reasoningEffort,
             branch: selectedBranch || undefined,
             agent: selectedAgent || undefined,
+            sandboxProvider: selectedProvider || undefined,
+            mode: selectedMode,
           }),
           signal: abortController.signal,
         });
@@ -182,7 +231,8 @@ export default function Home() {
           const data = await res.json();
           if (
             pendingConfigRef.current?.repo === currentConfig.repo &&
-            pendingConfigRef.current?.model === currentConfig.model
+            pendingConfigRef.current?.model === currentConfig.model &&
+            pendingConfigRef.current?.branch === currentConfig.branch
           ) {
             setPendingSessionId(data.sessionId);
             return data.sessionId as string;
@@ -213,6 +263,8 @@ export default function Home() {
     reasoningEffort,
     selectedBranch,
     selectedAgent,
+    selectedProvider,
+    selectedMode,
     pendingSessionId,
   ]);
 
@@ -322,6 +374,10 @@ export default function Home() {
       selectedAgent={selectedAgent}
       setSelectedAgent={setSelectedAgent}
       agentOptions={agentOptions}
+      selectedProvider={selectedProvider}
+      setSelectedProvider={setSelectedProvider}
+      selectedMode={selectedMode}
+      setSelectedMode={setSelectedMode}
       prompt={prompt}
       handlePromptChange={handlePromptChange}
       creating={creating}
@@ -350,6 +406,10 @@ function HomeContent({
   selectedAgent,
   setSelectedAgent,
   agentOptions,
+  selectedProvider,
+  setSelectedProvider,
+  selectedMode,
+  setSelectedMode,
   prompt,
   handlePromptChange,
   creating,
@@ -374,6 +434,10 @@ function HomeContent({
   selectedAgent: string;
   setSelectedAgent: (value: string) => void;
   agentOptions: { value: string; label: string }[];
+  selectedProvider: string;
+  setSelectedProvider: (value: string) => void;
+  selectedMode: SessionMode;
+  setSelectedMode: (value: SessionMode) => void;
   prompt: string;
   handlePromptChange: (value: string) => void;
   creating: boolean;
@@ -546,6 +610,47 @@ function HomeContent({
                       <span className="truncate max-w-[9rem] sm:max-w-none">
                         {agentOptions.find((o) => o.value === selectedAgent)?.label ??
                           "OpenCode default"}
+                      </span>
+                      <ChevronDownIcon className="w-3 h-3" />
+                    </Combobox>
+
+                    {/* Provider selector */}
+                    <Combobox
+                      value={selectedProvider}
+                      onChange={(value) => setSelectedProvider(value)}
+                      items={SANDBOX_PROVIDER_OPTIONS.map((o) => ({
+                        value: o.value,
+                        label: o.label,
+                      }))}
+                      direction="up"
+                      dropdownWidth="w-40"
+                      disabled={creating}
+                      triggerClassName="flex max-w-full items-center gap-1 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      <ServerIcon className="w-3.5 h-3.5" />
+                      <span className="truncate max-w-[9rem] sm:max-w-none">
+                        {SANDBOX_PROVIDER_OPTIONS.find((o) => o.value === selectedProvider)
+                          ?.label ?? "Auto"}
+                      </span>
+                      <ChevronDownIcon className="w-3 h-3" />
+                    </Combobox>
+
+                    {/* Mode selector */}
+                    <Combobox
+                      value={selectedMode}
+                      onChange={(value) => setSelectedMode(value as SessionMode)}
+                      items={MODE_OPTIONS.map((o) => ({
+                        value: o.value,
+                        label: o.label,
+                      }))}
+                      direction="up"
+                      dropdownWidth="w-40"
+                      disabled={creating}
+                      triggerClassName="flex max-w-full items-center gap-1 text-sm text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      <ModeIcon className="w-3.5 h-3.5" />
+                      <span className="truncate max-w-[9rem] sm:max-w-none">
+                        {MODE_OPTIONS.find((o) => o.value === selectedMode)?.label ?? "Apply"}
                       </span>
                       <ChevronDownIcon className="w-3 h-3" />
                     </Combobox>

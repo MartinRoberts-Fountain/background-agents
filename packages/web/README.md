@@ -82,8 +82,9 @@ NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=your_random_secret  # Generate: openssl rand -base64 32
 
 # Access Control (optional - leave empty to allow all authenticated users)
-ALLOWED_USERS=username1,username2          # Comma-separated GitHub usernames
-ALLOWED_EMAIL_DOMAINS=example.com,corp.io  # Comma-separated email domains
+ALLOWED_USERS=username1,username2                    # Comma-separated GitHub usernames
+ALLOWED_EMAIL_DOMAINS=example.com,corp.io            # Comma-separated email domains
+ALLOWED_GITHUB_ORGS=my-company,other-org            # Comma-separated GitHub org slugs (members get access)
 
 # Control Plane
 CONTROL_PLANE_URL=http://localhost:8787
@@ -93,9 +94,10 @@ CONTROL_PLANE_FETCH_MODE=auto
 NEXT_PUBLIC_WS_URL=ws://localhost:8787
 ```
 
-> **Access Control**: If both `ALLOWED_USERS` and `ALLOWED_EMAIL_DOMAINS` are empty, any
-> authenticated GitHub user can access the application. If either is set, users must match at least
-> one condition (username in allowed list OR email domain in allowed list).
+> **Access Control**: If all of `ALLOWED_USERS`, `ALLOWED_EMAIL_DOMAINS`, and `ALLOWED_GITHUB_ORGS`
+> are empty, any authenticated GitHub user can access the application. If any are set, users must
+> match at least one condition (username in list, email domain in list, or membership in an allowed
+> org).
 
 ### Development
 

@@ -618,6 +618,7 @@ Go to your fork's Settings → Secrets and variables → Actions, and add:
 | `NEXTAUTH_SECRET`             | Generated NextAuth secret                                                     |
 | `ALLOWED_USERS`               | Comma-separated GitHub usernames (or empty for all users)                     |
 | `ALLOWED_EMAIL_DOMAINS`       | Comma-separated email domains (or empty for all domains)                      |
+| `ALLOWED_GITHUB_ORGS`         | Comma-separated GitHub org slugs (members get access; or empty to disable)    |
 | `ENABLE_GITHUB_BOT`           | `true` to deploy GitHub bot worker (or empty to skip)                         |
 | `GH_WEBHOOK_SECRET`           | GitHub webhook secret (required if GitHub bot enabled)                        |
 | `GH_BOT_USERNAME`             | GitHub App bot username, e.g., `my-app[bot]` (required if GitHub bot enabled) |

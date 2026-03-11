@@ -23,9 +23,6 @@ spec:
       emptyDir: {}
     - name: shared-tmp
       emptyDir: {}
-    - name: bridge-runtime
-      configMap:
-        name: {{ include "sandbox.fullname" . }}-bridge
 
   containers:
     # ========================================
@@ -66,9 +63,6 @@ spec:
           mountPath: /workspace
         - name: shared-tmp
           mountPath: /tmp/shared
-        - name: bridge-runtime
-          mountPath: /app/sandbox
-          readOnly: true
       resources:
         {{- toYaml .Values.sandboxImage.resources | nindent 8 }}
       readinessProbe:

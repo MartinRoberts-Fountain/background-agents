@@ -59,6 +59,8 @@ export interface SandboxStorage {
   getSession(): SessionRow | null;
   /** Get user env vars for sandbox injection */
   getUserEnvVars(): Promise<Record<string, string> | undefined>;
+  /** Get VCS token for sandbox clone */
+  getVcsToken(): Promise<string | null>;
   /** Update sandbox status */
   updateSandboxStatus(status: SandboxStatus): void;
   /** Update sandbox for spawn (status, auth token, sandbox ID, created_at) */
@@ -163,7 +165,8 @@ const CHILD_SANDBOX_TIMEOUT_SECONDS = 3600; // 1 hour (vs default 2 hours)
 export interface RepoImageLookup {
   getLatestReady(
     repoOwner: string,
-    repoName: string
+    repoName: string,
+    baseBranch?: string
   ): Promise<{ provider_image_id: string; base_sha: string } | null>;
 }
 
@@ -349,7 +352,14 @@ export class SandboxLifecycleManager {
         repo_name: session.repo_name,
       });
 
-      const userEnvVars = await this.storage.getUserEnvVars();
+      const userEnvVars = (await this.storage.getUserEnvVars()) || {};
+
+      // Inject VCS clone token if available
+      const vcsToken = await this.storage.getVcsToken();
+      if (vcsToken && !userEnvVars["VCS_CLONE_TOKEN"]) {
+        userEnvVars["VCS_CLONE_TOKEN"] = vcsToken;
+      }
+
       const { provider, model: modelId } = this.resolveProviderAndModel(session);
 
       // Look up pre-built repo image (graceful fallback on failure)
@@ -359,7 +369,8 @@ export class SandboxLifecycleManager {
         try {
           const repoImage = await this.repoImageLookup.getLatestReady(
             session.repo_owner,
-            session.repo_name
+            session.repo_name,
+            session.base_branch
           );
           if (repoImage) {
             repoImageId = repoImage.provider_image_id;
@@ -493,7 +504,14 @@ export class SandboxLifecycleManager {
         snapshot_image_id: snapshotImageId,
       });
 
-      const userEnvVars = await this.storage.getUserEnvVars();
+      const userEnvVars = (await this.storage.getUserEnvVars()) || {};
+
+      // Inject VCS clone token if available
+      const vcsToken = await this.storage.getVcsToken();
+      if (vcsToken && !userEnvVars["VCS_CLONE_TOKEN"]) {
+        userEnvVars["VCS_CLONE_TOKEN"] = vcsToken;
+      }
+
       const { provider, model: modelId } = this.resolveProviderAndModel(session);
 
       // Child sessions get a shorter timeout (same logic as doSpawn)
