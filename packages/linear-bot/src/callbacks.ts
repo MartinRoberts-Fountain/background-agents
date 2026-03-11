@@ -10,7 +10,6 @@ import {
   emitAgentActivity,
   postIssueComment,
   updateAgentSession,
-  removeIssueLabel,
 } from "./utils/linear-client";
 import { extractAgentResponse, formatAgentResponse } from "./completion/extractor";
 import { timingSafeEqual } from "@open-inspect/shared";
@@ -289,9 +288,6 @@ async function handleCompletionCallback(
         await updateAgentSession(client, context.agentSessionId, {
           plan: makePlan(payload.success ? "completed" : "failed"),
         });
-
-        // Remove plan label from the ticket upon completion
-        await removeIssueLabel(client, context.issueId, "plan");
 
         // Update externalUrls with PR link if available
         const prArtifact = agentResponse.artifacts.find((a) => a.type === "pr" && a.url);

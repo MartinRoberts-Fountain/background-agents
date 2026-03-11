@@ -75,11 +75,5 @@ module "web_app" {
       targets   = ["production", "preview"]
       sensitive = false
     },
-    {
-      key       = "ALLOWED_GITHUB_ORGS"
-      value     = var.allowed_github_orgs
-      targets   = ["production", "preview"]
-      sensitive = false
-    },
   ]
 }

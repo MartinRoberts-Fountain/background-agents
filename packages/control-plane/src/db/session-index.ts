@@ -14,8 +14,7 @@ export interface SessionEntry {
   spawnDepth?: number;
   automationId?: string | null;
   automationRunId?: string | null;
-  mode?: string | null;
-  sandboxProvider?: "modal" | "helm" | "ec2" | null;
+  mode?: "plan" | "apply" | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -34,8 +33,7 @@ interface SessionRow {
   spawn_depth: number;
   automation_id: string | null;
   automation_run_id: string | null;
-  mode: string | null;
-  sandbox_provider: "modal" | "helm" | "ec2" | null;
+  mode: "plan" | "apply" | null;
   created_at: number;
   updated_at: number;
 }
@@ -71,7 +69,6 @@ function toEntry(row: SessionRow): SessionEntry {
     automationId: row.automation_id,
     automationRunId: row.automation_run_id,
     mode: row.mode,
-    sandboxProvider: row.sandbox_provider,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -83,8 +80,8 @@ export class SessionIndexStore {
   async create(session: SessionEntry): Promise<void> {
     await this.db
       .prepare(
-        `INSERT OR IGNORE INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, mode, sandbox_provider, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT OR IGNORE INTO sessions (id, title, repo_owner, repo_name, model, reasoning_effort, base_branch, status, parent_session_id, spawn_source, spawn_depth, automation_id, automation_run_id, mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         session.id,
@@ -101,7 +98,6 @@ export class SessionIndexStore {
         session.automationId ?? null,
         session.automationRunId ?? null,
         session.mode ?? null,
-        session.sandboxProvider ?? null,
         session.createdAt,
         session.updatedAt
       )

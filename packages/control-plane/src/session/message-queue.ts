@@ -169,12 +169,7 @@ export class SessionMessageQueue {
         reason: "no_sandbox",
       });
       this.deps.broadcast({ type: "sandbox_spawning" });
-      await this.deps.spawnSandbox().catch((err) => {
-        this.deps.log.error("prompt.spawn_sandbox_failed", {
-          event: "prompt.spawn_sandbox_failed",
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
+      await this.deps.spawnSandbox();
       return;
     }
 

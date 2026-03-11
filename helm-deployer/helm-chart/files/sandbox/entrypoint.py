@@ -26,10 +26,6 @@ from .log_config import configure_logging, get_logger
 configure_logging()
 
 
-class StartupInterruptedError(RuntimeError):
-    """Raised when startup is interrupted by an intentional shutdown signal."""
-
-
 class SandboxSupervisor:
     """
     Supervisor process for sandbox lifecycle management.
@@ -76,7 +72,6 @@ class SandboxSupervisor:
         # Parse session config if provided
         session_config_json = os.environ.get("SESSION_CONFIG", "{}")
         self.session_config = json.loads(session_config_json)
-        self.session_id = self._resolve_session_id()
 
         # Paths
         self.workspace_path = Path("/workspace")
@@ -84,20 +79,13 @@ class SandboxSupervisor:
         self.session_id_file = Path("/tmp/opencode-session-id")
 
         # Logger
+        session_id = self.session_config.get("session_id", "")
         self.log = get_logger(
             "supervisor",
             service="sandbox",
             sandbox_id=self.sandbox_id,
-            session_id=self.session_id,
+            session_id=session_id,
         )
-
-    def _resolve_session_id(self) -> str:
-        """Resolve session ID across known naming variants."""
-        # Prefer SESSION_CONFIG values, but fall back to top-level env for robustness.
-        session_id = self.session_config.get("session_id") or self.session_config.get("sessionId")
-        if session_id:
-            return str(session_id)
-        return os.environ.get("SESSION_ID", "")
 
     @property
     def base_branch(self) -> str:
@@ -109,14 +97,6 @@ class SandboxSupervisor:
         if authenticated and self.vcs_clone_token:
             return f"https://{self.vcs_clone_username}:{self.vcs_clone_token}@{self.vcs_host}/{self.repo_owner}/{self.repo_name}.git"
         return f"https://{self.vcs_host}/{self.repo_owner}/{self.repo_name}.git"
-
-    @staticmethod
-    def _tail_text(data: bytes | None, max_lines: int = 50) -> str:
-        """Decode bytes and return the last N lines for safe diagnostic logging."""
-        if not data:
-            return ""
-        text = data.decode(errors="replace")
-        return "\n".join(text.splitlines()[-max_lines:])
 
     async def perform_git_sync(self) -> bool:
         """
@@ -222,41 +202,14 @@ class SandboxSupervisor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            rebase_stdout, rebase_stderr = await result.communicate()
+            await result.wait()
 
             if result.returncode != 0:
                 # Check if there's actually a rebase in progress before trying to abort
                 rebase_merge = self.repo_path / ".git" / "rebase-merge"
                 rebase_apply = self.repo_path / ".git" / "rebase-apply"
-                rebase_in_progress = rebase_merge.exists() or rebase_apply.exists()
-
-                branch_cmd = await asyncio.create_subprocess_exec(
-                    "git",
-                    "rev-parse",
-                    "--abbrev-ref",
-                    "HEAD",
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                branch_stdout, _ = await branch_cmd.communicate()
-                current_branch = branch_stdout.decode(errors="replace").strip()
-
-                status_cmd = await asyncio.create_subprocess_exec(
-                    "git",
-                    "status",
-                    "--porcelain=v1",
-                    "--branch",
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                status_stdout, _ = await status_cmd.communicate()
-
-                abort_exit_code = None
-                abort_output_tail = ""
-                if rebase_in_progress:
-                    abort_result = await asyncio.create_subprocess_exec(
+                if rebase_merge.exists() or rebase_apply.exists():
+                    await asyncio.create_subprocess_exec(
                         "git",
                         "rebase",
                         "--abort",
@@ -264,24 +217,7 @@ class SandboxSupervisor:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    abort_stdout, abort_stderr = await abort_result.communicate()
-                    abort_exit_code = abort_result.returncode
-                    abort_output_tail = self._tail_text(abort_stdout) or self._tail_text(
-                        abort_stderr
-                    )
-
-                self.log.error(
-                    "git.rebase_error",
-                    base_branch=base_branch,
-                    current_branch=current_branch,
-                    exit_code=result.returncode,
-                    rebase_in_progress=rebase_in_progress,
-                    rebase_stdout_tail=self._tail_text(rebase_stdout),
-                    rebase_stderr_tail=self._tail_text(rebase_stderr),
-                    status_tail=self._tail_text(status_stdout),
-                    abort_exit_code=abort_exit_code,
-                    abort_output_tail=abort_output_tail,
-                )
+                self.log.warn("git.rebase_error", base_branch=base_branch)
 
             # Get current SHA
             result = await asyncio.create_subprocess_exec(
@@ -394,7 +330,7 @@ class SandboxSupervisor:
                 "*": {
                     "*": "allow",
                 },
-            },
+            }
         }
 
         # Determine working directory - use repo path if cloned, otherwise /workspace
@@ -462,76 +398,40 @@ class SandboxSupervisor:
         """Poll health endpoint until server is ready."""
         health_url = f"http://localhost:{self.OPENCODE_PORT}/global/health"
         start_time = time.time()
-        attempts = 0
-        connect_error_count = 0
-        last_error = ""
 
         async with httpx.AsyncClient() as client:
             while time.time() - start_time < self.HEALTH_CHECK_TIMEOUT:
                 if self.shutdown_event.is_set():
-                    raise StartupInterruptedError("Shutdown requested during startup")
+                    raise RuntimeError("Shutdown requested during startup")
 
                 try:
-                    attempts += 1
                     resp = await client.get(health_url, timeout=2.0)
                     if resp.status_code == 200:
                         return
-                    last_error = f"unexpected_status:{resp.status_code}"
-                    if attempts % 5 == 0:
-                        elapsed_ms = int((time.time() - start_time) * 1000)
-                        self.log.debug(
-                            "opencode.health_check_retry",
-                            attempts=attempts,
-                            elapsed_ms=elapsed_ms,
-                            status_code=resp.status_code,
-                        )
                 except httpx.ConnectError:
-                    connect_error_count += 1
-                    last_error = "connect_error"
-                    # Log every 5th connect failure to keep noise manageable.
-                    if connect_error_count % 5 == 0:
-                        elapsed_ms = int((time.time() - start_time) * 1000)
-                        self.log.debug(
-                            "opencode.health_check_connect_error",
-                            attempts=attempts,
-                            connect_error_count=connect_error_count,
-                            elapsed_ms=elapsed_ms,
-                            health_url=health_url,
-                        )
+                    pass
                 except Exception as e:
                     self.log.debug("opencode.health_check_error", exc=e)
 
                 await asyncio.sleep(0.5)
 
-        raise RuntimeError(
-            "OpenCode server failed to become healthy "
-            f"(attempts={attempts}, connect_errors={connect_error_count}, last_error={last_error})"
-        )
+        raise RuntimeError("OpenCode server failed to become healthy")
 
     async def start_bridge(self) -> None:
         """Start the agent bridge process."""
         self.log.info("bridge.start")
 
         if not self.control_plane_url:
-            self.log.info(
-                "bridge.skip",
-                reason="no_control_plane_url",
-                has_sandbox_token=bool(self.sandbox_token),
-            )
+            self.log.info("bridge.skip", reason="no_control_plane_url")
             return
 
         # Wait for OpenCode to be ready
         await self.opencode_ready.wait()
 
-        # Get session_id (required for WebSocket connection)
-        session_id = self.session_id
+        # Get session_id from config (required for WebSocket connection)
+        session_id = self.session_config.get("session_id", "")
         if not session_id:
-            self.log.info(
-                "bridge.skip",
-                reason="no_session_id",
-                control_plane_url=self.control_plane_url,
-                has_sandbox_token=bool(self.sandbox_token),
-            )
+            self.log.info("bridge.skip", reason="no_session_id")
             return
 
         # Run bridge as a module (works with relative imports)
@@ -570,10 +470,7 @@ class SandboxSupervisor:
                 self.log.error(
                     "bridge.startup_crash",
                     exit_code=exit_code,
-                    output_tail=self._tail_text(stdout),
-                    control_plane_url=self.control_plane_url,
-                    has_sandbox_token=bool(self.sandbox_token),
-                    session_id=session_id,
+                    output=stdout.decode() if stdout else "",
                 )
 
     async def _forward_bridge_logs(self) -> None:
@@ -751,24 +648,12 @@ class SandboxSupervisor:
 
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(
+                await client.post(
                     f"{self.control_plane_url}/sandbox/{self.sandbox_id}/error",
                     json={"error": message, "fatal": True},
                     headers={"Authorization": f"Bearer {self.sandbox_token}"},
                     timeout=5.0,
                 )
-                if response.status_code >= 400:
-                    self.log.error(
-                        "supervisor.report_error_rejected",
-                        status_code=response.status_code,
-                        response_body=self._tail_text(response.text.encode(), max_lines=20),
-                        has_sandbox_token=bool(self.sandbox_token),
-                    )
-                else:
-                    self.log.info(
-                        "supervisor.report_error_sent",
-                        status_code=response.status_code,
-                    )
         except Exception as e:
             self.log.error("supervisor.report_error_failed", exc=e)
 
@@ -1179,10 +1064,6 @@ class SandboxSupervisor:
             # Phase 7: Monitor processes
             await self.monitor_processes()
 
-        except StartupInterruptedError:
-            # A signal arrived while we were still booting; this is a normal
-            # shutdown path and should not be reported as a fatal sandbox error.
-            self.log.info("supervisor.startup_interrupted")
         except Exception as e:
             self.log.error("supervisor.error", exc=e)
             await self._report_fatal_error(str(e))

@@ -14,7 +14,6 @@ import {
   CopyIcon,
   CheckIcon,
   LinkIcon,
-  ServerIcon,
 } from "@/components/ui/icons";
 import { Badge, prBadgeVariant } from "@/components/ui/badge";
 
@@ -28,7 +27,6 @@ interface MetadataSectionProps {
   repoName?: string;
   artifacts?: Artifact[];
   parentSessionId?: string | null;
-  sandboxProvider?: "modal" | "helm" | "ec2" | null;
 }
 
 export function MetadataSection({
@@ -41,7 +39,6 @@ export function MetadataSection({
   repoName,
   artifacts = [],
   parentSessionId,
-  sandboxProvider,
 }: MetadataSectionProps) {
   const [copied, setCopied] = useState(false);
 
@@ -92,20 +89,6 @@ export function MetadataSection({
           <span>
             {formatModelName(model)}
             {reasoningEffort && <span> · {reasoningEffort}</span>}
-          </span>
-        </div>
-      )}
-
-      {/* Sandbox Provider */}
-      {sandboxProvider && (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <ServerIcon className="w-4 h-4" />
-          <span>
-            {sandboxProvider === "helm"
-              ? "Kubernetes"
-              : sandboxProvider === "ec2"
-                ? "EC2"
-                : "Modal"}
           </span>
         </div>
       )}

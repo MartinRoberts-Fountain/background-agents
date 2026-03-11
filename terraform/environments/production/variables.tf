@@ -372,9 +372,3 @@ variable "allowed_email_domains" {
   type        = string
   default     = ""
 }
-
-variable "allowed_github_orgs" {
-  description = "Comma-separated list of GitHub org slugs; members of these orgs can sign in (empty = no org-based restriction)."
-  type        = string
-  default     = ""
-}
