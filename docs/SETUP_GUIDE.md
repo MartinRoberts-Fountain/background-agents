@@ -92,6 +92,7 @@ INTERNAL_CALLBACK_SECRET=your_shared_secret
 # Optional access control
 ALLOWED_USERS=
 ALLOWED_EMAIL_DOMAINS=
+ALLOWED_GITHUB_ORGS=   # e.g. my-company to allow all members of that org
 ```
 
 Do not commit `packages/web/.env.local`.
@@ -203,7 +204,8 @@ Your GitHub callback URL does not exactly match the running app URL.
 
 ### Access denied after sign-in
 
-Check `ALLOWED_USERS` and `ALLOWED_EMAIL_DOMAINS` in `packages/web/.env.local`.
+Check `ALLOWED_USERS`, `ALLOWED_EMAIL_DOMAINS`, and `ALLOWED_GITHUB_ORGS` in
+`packages/web/.env.local`.
 
 ### Web can load, but session APIs return 401
 

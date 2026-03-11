@@ -29,7 +29,6 @@ describe("createSessionInternalRoutes", () => {
       childSummary: noopHandler(),
       cancel: noopHandler(),
       childSessionUpdate: noopHandler(),
-      vcsTokenRefresh: noopHandler(),
     });
 
     const methodPathSet = new Set(routes.map((route) => `${route.method} ${route.path}`));

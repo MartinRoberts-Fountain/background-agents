@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { parseAllowlist, checkAccessAllowed } from "./access-control";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { parseAllowlist, checkAccessAllowed, checkGitHubOrgMembership } from "./access-control";
 
 describe("parseAllowlist", () => {
   it("returns empty array for undefined", () => {
@@ -140,5 +140,88 @@ describe("checkAccessAllowed", () => {
       expect(checkAccessAllowed(config, { email: "user@company.com" })).toBe(true);
       expect(checkAccessAllowed(config, { email: "user@partner.org" })).toBe(true);
     });
+  });
+});
+
+describe("checkGitHubOrgMembership", () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("returns true when allowedOrgs is empty (no org restriction)", async () => {
+    expect(await checkGitHubOrgMembership("token", [])).toBe(true);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("returns true when user is in an allowed org", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          { organization: { login: "other-org" }, state: "active" },
+          { organization: { login: "my-company" }, state: "active" },
+        ]),
+    });
+
+    expect(await checkGitHubOrgMembership("token", ["my-company"])).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("api.github.com/user/memberships/orgs"),
+      expect.any(Object)
+    );
+  });
+
+  it("returns true when org match is case-insensitive", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([{ organization: { login: "My-Company" }, state: "active" }]),
+    });
+
+    expect(await checkGitHubOrgMembership("token", ["my-company"])).toBe(true);
+  });
+
+  it("returns false when user is not in any allowed org", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([{ organization: { login: "other-org" }, state: "active" }]),
+    });
+
+    expect(await checkGitHubOrgMembership("token", ["my-company"])).toBe(false);
+  });
+
+  it("returns false when API returns non-ok", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: false,
+    });
+
+    expect(await checkGitHubOrgMembership("token", ["my-company"])).toBe(false);
+  });
+
+  it("paginates until finding a match", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve(
+            Array(100)
+              .fill(null)
+              .map((_, i) => ({
+                organization: { login: `org-${i}` },
+                state: "active",
+              }))
+          ),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve([{ organization: { login: "my-company" }, state: "active" }]),
+      });
+
+    expect(await checkGitHubOrgMembership("token", ["my-company"])).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
 });

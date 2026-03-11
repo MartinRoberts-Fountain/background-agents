@@ -43,6 +43,7 @@ export type EventType =
   | "user_message";
 export type ParticipantRole = "owner" | "member";
 export type SpawnSource = "user" | "agent" | "automation";
+export type SessionMode = "plan" | "apply" | "code_review";
 export type ConfidenceLevel = "high" | "medium" | "low";
 
 // Participant in a session
@@ -70,7 +71,8 @@ export interface Session {
   parentSessionId: string | null;
   spawn_source: SpawnSource;
   spawn_depth: number;
-  mode?: "plan" | "apply";
+  mode?: SessionMode;
+  sandboxProvider?: "modal" | "helm" | "ec2" | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -321,6 +323,7 @@ export interface SessionState {
   reasoningEffort?: string;
   isProcessing?: boolean;
   parentSessionId?: string | null;
+  sandboxProvider?: "modal" | "helm" | "ec2" | null;
 }
 
 // Participant presence info
@@ -484,8 +487,8 @@ export interface CreateSessionRequest {
   agent?: string;
   /** Override the infrastructure provider for this session ("modal", "helm", or "ec2"). */
   sandboxProvider?: "modal" | "helm" | "ec2";
-  /** The session mode: "plan" for analysis/planning, "apply" for implementation. */
-  mode?: "plan" | "apply";
+  /** The session mode: "plan" for analysis/planning, "apply" for implementation, "code_review" for code review. */
+  mode?: SessionMode;
 }
 
 export interface CreateSessionResponse {
@@ -509,7 +512,7 @@ export interface SpawnChildSessionRequest {
   repoName?: string;
   model?: string;
   reasoningEffort?: string;
-  mode?: "plan" | "apply";
+  mode?: SessionMode;
   sandboxProvider?: "modal" | "helm" | "ec2";
 }
 
@@ -520,8 +523,9 @@ export interface SpawnContext {
   repoId: number | null;
   model: string;
   reasoningEffort: string | null;
-  mode: "plan" | "apply" | null;
+  mode: SessionMode | null;
   sandboxProvider: "modal" | "helm" | "ec2" | null;
+  baseBranch: string | null;
   owner: {
     userId: string;
     scmLogin: string | null;
@@ -549,6 +553,23 @@ export interface ChildSessionDetail {
   sandbox: { status: SandboxStatus } | null;
   artifacts: Array<{ type: string; url: string; metadata: unknown }>;
   recentEvents: Array<{ type: string; data: unknown; createdAt: number }>;
+}
+
+// --- Mode templates ---
+
+export const SESSION_MODES: SessionMode[] = ["plan", "apply", "code_review"];
+
+export const SESSION_MODE_LABELS: Record<SessionMode, string> = {
+  plan: "Plan",
+  apply: "Apply",
+  code_review: "Code Review",
+};
+
+export interface ModeTemplate {
+  mode: SessionMode;
+  systemPrompt: string;
+  defaultModel: string | null;
+  updatedAt: number;
 }
 
 export * from "./integrations";
