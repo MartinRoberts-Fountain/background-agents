@@ -157,7 +157,7 @@ export class SessionDO extends DurableObject<Env> {
     wsToken: (request) => this.handleGenerateWsToken(request),
     archive: (request) => this.handleArchive(request),
     unarchive: (request) => this.handleUnarchive(request),
-    verifySandboxToken: (request) => this.handleVerifySandboxToken(request),
+    verifySandboxToken: (request) => this.sandboxHandler.verifySandboxToken(request),
     openaiTokenRefresh: () => this.handleOpenAITokenRefresh(),
     vcsTokenRefresh: () => this.handleVcsTokenRefresh(),
     spawnContext: () => this.handleGetSpawnContext(),
