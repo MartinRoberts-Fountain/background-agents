@@ -166,7 +166,3 @@ allowed_users = ""
 # Leave empty to allow all email domains
 # Example: "example.com,corp.io"
 allowed_email_domains = ""
-
-# Comma-separated list of GitHub org slugs; members of these orgs can sign in
-# Leave empty for no org-based restriction. Example: "my-company,partner-org"
-allowed_github_orgs = ""

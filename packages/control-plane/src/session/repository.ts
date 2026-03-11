@@ -71,7 +71,7 @@ export interface UpsertSessionData {
   spawnDepth?: number;
   defaultAgent?: string | null;
   sandboxProvider?: string | null;
-  mode?: string | null;
+  mode?: "plan" | "apply" | null;
   createdAt: number;
   updatedAt: number;
 }

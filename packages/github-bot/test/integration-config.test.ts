@@ -20,8 +20,7 @@ function createMockLogger(): Logger {
 
 function createMockEnv(fetchImpl: (url: string, init?: RequestInit) => Promise<Response>): Env {
   return {
-    GITHUB_KV: { get: vi.fn(), put: vi.fn() },
-    CONTROL_PLANE: { fetch: vi.fn(fetchImpl) },
+    CONTROL_PLANE: { fetch: vi.fn(fetchImpl) } as unknown as Fetcher,
     DEFAULT_MODEL: "anthropic/claude-haiku-4-5",
     INTERNAL_CALLBACK_SECRET: "test-secret",
   } as unknown as Env;

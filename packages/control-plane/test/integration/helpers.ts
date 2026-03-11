@@ -15,8 +15,6 @@ export async function initSession(overrides?: {
   reasoningEffort?: string;
   userId?: string;
   scmLogin?: string;
-  mode?: string | null;
-  sandboxProvider?: string | null;
 }) {
   const id = env.SESSION.newUniqueId();
   const stub = env.SESSION.get(id);
@@ -124,8 +122,6 @@ export async function initNamedSession(
     model?: string;
     userId?: string;
     scmLogin?: string;
-    mode?: string | null;
-    sandboxProvider?: string | null;
   }
 ) {
   const id = env.SESSION.idFromName(sessionName);

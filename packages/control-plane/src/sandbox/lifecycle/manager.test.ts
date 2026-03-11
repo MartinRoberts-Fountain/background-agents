@@ -110,10 +110,6 @@ function createMockStorage(
       calls.push("getUserEnvVars");
       return userEnvVars;
     }),
-    getVcsToken: vi.fn(async () => {
-      calls.push("getVcsToken");
-      return "test-vcs-token";
-    }),
     updateSandboxStatus: vi.fn((status: SandboxStatus) => {
       calls.push(`updateSandboxStatus:${status}`);
       if (sandbox) sandbox.status = status;
@@ -1192,37 +1188,6 @@ describe("SandboxLifecycleManager", () => {
           repoImageId: null,
           repoImageSha: null,
         })
-      );
-    });
-
-    it("passes session base_branch to repo image lookup", async () => {
-      const session = createMockSession({ base_branch: "feature/xyz" });
-      const sandbox = createMockSandbox({ status: "pending", created_at: Date.now() - 60000 });
-      const storage = createMockStorage(session, sandbox);
-      const provider = createMockProvider();
-
-      const repoImageLookup: RepoImageLookup = {
-        getLatestReady: vi.fn(async () => null),
-      };
-
-      const manager = new SandboxLifecycleManager(
-        provider,
-        storage,
-        createMockBroadcaster(),
-        createMockWebSocketManager(false),
-        createMockAlarmScheduler(),
-        createMockIdGenerator(),
-        createTestConfig(),
-        {},
-        repoImageLookup
-      );
-
-      await manager.spawnSandbox();
-
-      expect(repoImageLookup.getLatestReady).toHaveBeenCalledWith(
-        "testowner",
-        "testrepo",
-        "feature/xyz"
       );
     });
 

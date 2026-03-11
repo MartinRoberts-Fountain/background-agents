@@ -159,12 +159,12 @@ export class CallbackNotificationService {
           return;
         }
 
-        const responseText = await response.text().catch(() => "");
+        const responseText = await response.text();
         this.log.error("Callback failed", {
           message_id: messageId,
           source,
           status: response.status,
-          response_text: responseText.slice(0, 1000),
+          response_text: responseText,
         });
       } catch (e) {
         this.log.error("Callback attempt failed", {

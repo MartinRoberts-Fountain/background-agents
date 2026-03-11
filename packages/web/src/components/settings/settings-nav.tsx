@@ -10,7 +10,6 @@ import {
   IntegrationsIcon,
   ChevronRightIcon,
   SparkleIcon,
-  ModeIcon,
 } from "@/components/ui/icons";
 
 const NAV_ITEMS = [
@@ -28,11 +27,6 @@ const NAV_ITEMS = [
     id: "agents",
     label: "Agents",
     icon: SparkleIcon,
-  },
-  {
-    id: "modes",
-    label: "Modes",
-    icon: ModeIcon,
   },
   {
     id: "images",

@@ -62,8 +62,6 @@ export async function POST(request: NextRequest) {
       branch: body.branch,
       title: body.title,
       agent: body.agent,
-      sandboxProvider: body.sandboxProvider,
-      mode: body.mode,
       scmToken: accessToken,
       userId,
       scmLogin: user.login,

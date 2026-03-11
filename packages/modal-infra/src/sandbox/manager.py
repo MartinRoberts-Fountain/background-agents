@@ -420,6 +420,9 @@ class SandboxManager:
             session_id = session_config.session_id
             branch = getattr(session_config, "branch", None)
             agent = getattr(session_config, "agent", None)
+
+        # Use provided sandbox_id or generate one
+        if not sandbox_id:
             sandbox_id = f"sandbox-{repo_owner}-{repo_name}-{int(time.time() * 1000)}"
 
         # Lookup the image by ID
@@ -447,8 +450,8 @@ class SandboxManager:
                         "repo_name": repo_name,
                         "provider": provider,
                         "model": model,
+                        "branch": branch,
                         "agent": agent,
-                        **({"branch": branch} if branch else {}),
                     }
                 ),
             }

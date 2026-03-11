@@ -9,7 +9,6 @@ import type {
   LinearIssueDetails,
   AgentSessionWebhook,
   AgentSessionWebhookIssue,
-  IssueUpdateWebhook,
 } from "./types";
 import {
   getLinearClient,
@@ -17,7 +16,6 @@ import {
   fetchIssueDetails,
   updateAgentSession,
   getRepoSuggestions,
-  postIssueComment,
 } from "./utils/linear-client";
 import { generateInternalToken } from "./utils/internal";
 import { classifyRepo } from "./classifier";
@@ -58,24 +56,6 @@ async function getAuthHeaders(env: Env, traceId?: string): Promise<Record<string
   }
   if (traceId) headers["x-trace-id"] = traceId;
   return headers;
-}
-
-async function fetchModeSystemPrompt(
-  env: Env,
-  headers: Record<string, string>,
-  mode: string
-): Promise<string> {
-  try {
-    const res = await env.CONTROL_PLANE.fetch(`https://internal/mode-templates/${mode}`, {
-      method: "GET",
-      headers,
-    });
-    if (!res.ok) return "";
-    const data = (await res.json()) as { systemPrompt?: string };
-    return data.systemPrompt ?? "";
-  } catch {
-    return "";
-  }
 }
 
 // ─── Sub-handlers ────────────────────────────────────────────────────────────
@@ -139,14 +119,6 @@ async function handleFollowUp(
       org_id: orgId,
       agent_session_id: agentSessionId,
     });
-
-    if (env.LINEAR_API_KEY) {
-      await postIssueComment(
-        env.LINEAR_API_KEY,
-        issue.id,
-        `⚠️ **Open-Inspect Error**: Failed to initialize Linear client (missing OAuth token for workspace). Please reinstall the integration.\n\n*Trace ID: ${traceId}*`
-      );
-    }
     return;
   }
 
@@ -204,9 +176,7 @@ async function handleFollowUp(
 
   let promptContent: string;
   if (isPlanMode) {
-    const planSystemPrompt = await fetchModeSystemPrompt(env, headers, "plan");
-    const modeInstruction = planSystemPrompt ? `\n\n${planSystemPrompt}` : "";
-    promptContent = `Follow-up on ${issue.identifier} — the user has provided feedback on the plan. Please revise the plan based on their comments and provide an updated implementation plan.\n\n**User feedback:**\n${followUpContent}${sessionContext}${modeInstruction}`;
+    promptContent = `Follow-up on ${issue.identifier} — the user has provided feedback on the plan. Please revise the plan based on their comments and provide an updated implementation plan.\n\n**User feedback:**\n${followUpContent}${sessionContext}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Revise your previous plan based on the feedback above. Provide the complete updated plan, not just the changes.`;
   } else {
     promptContent = `Follow-up on ${issue.identifier}:\n\n${followUpContent}${sessionContext}`;
   }
@@ -232,24 +202,12 @@ async function handleFollowUp(
         : `Follow-up sent to existing session.\n\n[View session](${env.WEB_APP_URL}/session/${existingSession.sessionId})`,
     });
   } else {
-    const errorBody = isPlanMode
-      ? `Failed to send plan revision to the existing session.\n\n\`HTTP ${promptRes.status}\`\n\n*Trace ID: ${traceId}*`
-      : `Failed to send follow-up to the existing session.\n\n\`HTTP ${promptRes.status}\`\n\n*Trace ID: ${traceId}*`;
-
-    try {
-      await emitAgentActivity(client, agentSessionId, {
-        type: "error",
-        body: errorBody,
-      });
-    } catch {
-      if (env.LINEAR_API_KEY) {
-        await postIssueComment(
-          env.LINEAR_API_KEY,
-          issue.id,
-          `⚠️ **Open-Inspect Error**: ${errorBody}`
-        );
-      }
-    }
+    await emitAgentActivity(client, agentSessionId, {
+      type: "error",
+      body: isPlanMode
+        ? "Failed to send plan revision to the existing session."
+        : "Failed to send follow-up to the existing session.",
+    });
   }
 
   log.info("agent_session.followup", {
@@ -282,14 +240,6 @@ async function handleNewSession(
       org_id: orgId,
       agent_session_id: agentSessionId,
     });
-
-    if (env.LINEAR_API_KEY) {
-      await postIssueComment(
-        env.LINEAR_API_KEY,
-        issue.id,
-        `⚠️ **Open-Inspect Error**: Failed to initialize Linear client for follow-up (missing OAuth token). Please reinstall the integration.\n\n*Trace ID: ${traceId}*`
-      );
-    }
     return;
   }
 
@@ -511,21 +461,10 @@ async function handleNewSession(
     } catch {
       /* ignore */
     }
-    const errorBody = `Failed to create a coding session.\n\n\`HTTP ${sessionRes.status}: ${sessionErrBody.slice(0, 200)}\`\n\n*Trace ID: ${traceId}*`;
-    try {
-      await emitAgentActivity(client, agentSessionId, {
-        type: "error",
-        body: errorBody,
-      });
-    } catch {
-      if (env.LINEAR_API_KEY) {
-        await postIssueComment(
-          env.LINEAR_API_KEY,
-          issue.id,
-          `⚠️ **Open-Inspect Error**: ${errorBody}`
-        );
-      }
-    }
+    await emitAgentActivity(client, agentSessionId, {
+      type: "error",
+      body: `Failed to create a coding session.\n\n\`HTTP ${sessionRes.status}: ${sessionErrBody.slice(0, 200)}\``,
+    });
     log.error("control_plane.create_session", {
       trace_id: traceId,
       issue_identifier: issue.identifier,
@@ -562,14 +501,14 @@ async function handleNewSession(
   // ─── Build and send prompt ────────────────────────────────────────────
 
   // Prefer Linear's promptContext (includes issue, comments, guidance)
-  const modeSystemPrompt = await fetchModeSystemPrompt(env, headers, mode);
   const basePrompt =
-    webhook.agentSession.promptContext ||
-    buildPrompt(issue, issueDetails, comment, mode, modeSystemPrompt);
+    webhook.agentSession.promptContext || buildPrompt(issue, issueDetails, comment, mode);
   const prompt =
-    webhook.agentSession.promptContext && modeSystemPrompt
-      ? `${basePrompt}\n\n${modeSystemPrompt}`
-      : basePrompt;
+    mode === "plan" && webhook.agentSession.promptContext
+      ? `${basePrompt}\n\nIMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations.`
+      : mode === "apply" && webhook.agentSession.promptContext
+        ? `${basePrompt}\n\nIMPORTANT: You are in APPLY mode. Create a new branch, implement all changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI.`
+        : basePrompt;
   const callbackContext: CallbackContext = {
     source: "linear",
     issueId: issue.id,
@@ -603,21 +542,10 @@ async function handleNewSession(
     } catch {
       /* ignore */
     }
-    const errorBody = `Failed to send the prompt to the coding session.\n\n\`HTTP ${promptRes.status}: ${promptErrBody.slice(0, 200)}\`\n\n*Trace ID: ${traceId}*`;
-    try {
-      await emitAgentActivity(client, agentSessionId, {
-        type: "error",
-        body: errorBody,
-      });
-    } catch {
-      if (env.LINEAR_API_KEY) {
-        await postIssueComment(
-          env.LINEAR_API_KEY,
-          issue.id,
-          `⚠️ **Open-Inspect Error**: ${errorBody}`
-        );
-      }
-    }
+    await emitAgentActivity(client, agentSessionId, {
+      type: "error",
+      body: `Failed to send the prompt to the coding session.\n\n\`HTTP ${promptRes.status}: ${promptErrBody.slice(0, 200)}\``,
+    });
     log.error("control_plane.send_prompt", {
       trace_id: traceId,
       session_id: session.sessionId,
@@ -936,22 +864,8 @@ function buildPrompt(
   issue: { identifier: string; title: string; description?: string | null; url: string },
   issueDetails: LinearIssueDetails | null,
   comment?: { body: string } | null,
-  _mode: SessionMode = "apply",
-  modeSystemPrompt = ""
+  mode: SessionMode = "apply"
 ): string {
-  const SESSION_THREAD_MARKER = "This thread is for an agent session with fountaincodingagent.";
-
-  const isSessionThreadMarkerComment = (body: string): boolean => {
-    const normalized = body.trim();
-    return (
-      normalized === SESSION_THREAD_MARKER ||
-      normalized === `**Unknown:** ${SESSION_THREAD_MARKER}` ||
-      normalized === `**Agent instruction:** ${SESSION_THREAD_MARKER}` ||
-      normalized ===
-        `**Unknown:** ${SESSION_THREAD_MARKER}\n\n---\n**Agent instruction:** ${SESSION_THREAD_MARKER}`
-    );
-  };
-
   const parts: string[] = [
     `Linear Issue: ${issue.identifier} — ${issue.title}`,
     `URL: ${issue.url}`,
@@ -979,27 +893,30 @@ function buildPrompt(
       parts.push(`**Priority:** ${issueDetails.priorityLabel}`);
     }
 
-    // Include comments for context, excluding bot-generated and unknown-author comments
-    const EXCLUDED_AUTHORS = new Set(["Fountain Coding AgentX", "Unknown"]);
-    const filteredComments = issueDetails.comments.filter(
-      (c) =>
-        !isSessionThreadMarkerComment(c.body) && c.user?.name && !EXCLUDED_AUTHORS.has(c.user.name)
-    );
-
-    if (filteredComments.length > 0) {
-      parts.push("", "---", "**Comments:**");
-      for (const c of filteredComments) {
-        parts.push(`- **${c.user!.name}:** ${c.body}`);
+    // Include recent comments for context
+    if (issueDetails.comments.length > 0) {
+      parts.push("", "---", "**Recent comments:**");
+      for (const c of issueDetails.comments.slice(-5)) {
+        const author = c.user?.name || "Unknown";
+        parts.push(`- **${author}:** ${c.body.slice(0, 200)}`);
       }
     }
   }
 
-  if (comment?.body && !isSessionThreadMarkerComment(comment.body)) {
+  if (comment?.body) {
     parts.push("", "---", `**Agent instruction:** ${comment.body}`);
   }
 
-  if (modeSystemPrompt) {
-    parts.push("", modeSystemPrompt);
+  if (mode === "plan") {
+    parts.push(
+      "",
+      "IMPORTANT: You are in PLAN mode. Do NOT make any code changes or create a pull request. Instead, analyze the codebase and provide a detailed implementation plan that includes the files to modify, the specific changes needed, and any risks or considerations."
+    );
+  } else {
+    parts.push(
+      "",
+      "IMPORTANT: You are in APPLY mode. Create a new branch off the base branch, implement the changes, commit, and call the create-pull-request tool to open a pull request. Do NOT use the gh CLI. You MUST open a pull request before finishing."
+    );
   }
 
   return parts.join("\n");

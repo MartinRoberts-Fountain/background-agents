@@ -45,17 +45,17 @@ export class RepoImageStore {
     buildDurationSeconds: number
   ): Promise<{ replacedImageId: string | null }> {
     const build = await this.db
-      .prepare("SELECT repo_owner, repo_name, base_branch FROM repo_images WHERE id = ?")
+      .prepare("SELECT repo_owner, repo_name FROM repo_images WHERE id = ?")
       .bind(buildId)
-      .first<{ repo_owner: string; repo_name: string; base_branch: string }>();
+      .first<{ repo_owner: string; repo_name: string }>();
 
     if (!build) return { replacedImageId: null };
 
     const oldReady = await this.db
       .prepare(
-        "SELECT id, provider_image_id FROM repo_images WHERE repo_owner = ? AND repo_name = ? AND base_branch = ? AND status = 'ready'"
+        "SELECT id, provider_image_id FROM repo_images WHERE repo_owner = ? AND repo_name = ? AND status = 'ready'"
       )
-      .bind(build.repo_owner, build.repo_name, build.base_branch)
+      .bind(build.repo_owner, build.repo_name)
       .first<{ id: string; provider_image_id: string }>();
 
     const statements: D1PreparedStatement[] = [
@@ -82,19 +82,7 @@ export class RepoImageStore {
       .run();
   }
 
-  async getLatestReady(
-    repoOwner: string,
-    repoName: string,
-    baseBranch?: string
-  ): Promise<RepoImage | null> {
-    if (baseBranch) {
-      return this.db
-        .prepare(
-          "SELECT * FROM repo_images WHERE repo_owner = ? AND repo_name = ? AND base_branch = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1"
-        )
-        .bind(repoOwner.toLowerCase(), repoName.toLowerCase(), baseBranch)
-        .first<RepoImage>();
-    }
+  async getLatestReady(repoOwner: string, repoName: string): Promise<RepoImage | null> {
     return this.db
       .prepare(
         "SELECT * FROM repo_images WHERE repo_owner = ? AND repo_name = ? AND status = 'ready' ORDER BY created_at DESC LIMIT 1"

@@ -209,31 +209,3 @@ export interface AgentSessionWebhook {
   };
   agentActivity?: { body?: string };
 }
-
-// ─── Issue Update Webhook Payload ────────────────────────────────────────────
-
-export interface IssueUpdateWebhook {
-  type: "Issue";
-  action: "update";
-  organizationId: string;
-  data: {
-    id: string;
-    identifier: string;
-    title: string;
-    description?: string | null;
-    url: string;
-    priority: number;
-    priorityLabel: string;
-    state: { id: string; name: string; type: string };
-    teamId: string;
-    team: { id: string; key: string; name: string };
-    labelIds?: string[];
-    labels?: Array<{ id: string; name: string }>;
-    assignee?: { id: string; name: string };
-    project?: { id: string; name: string };
-  };
-  updatedFrom: {
-    stateId?: string;
-    [key: string]: unknown;
-  };
-}

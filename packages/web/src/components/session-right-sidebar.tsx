@@ -63,7 +63,6 @@ export function SessionRightSidebarContent({
           repoName={sessionState.repoName}
           artifacts={artifacts}
           parentSessionId={sessionState.parentSessionId}
-          sandboxProvider={sessionState.sandboxProvider}
         />
       </div>
 

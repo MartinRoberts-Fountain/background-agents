@@ -69,7 +69,6 @@ resource "local_file" "web_app_wrangler_production" {
     NEXT_PUBLIC_WS_URL = "${local.ws_url}"
     ALLOWED_USERS = "${var.allowed_users}"
     ALLOWED_EMAIL_DOMAINS = "${var.allowed_email_domains}"
-    ALLOWED_GITHUB_ORGS = "${var.allowed_github_orgs}"
 
     [assets]
     directory = ".open-next/assets"

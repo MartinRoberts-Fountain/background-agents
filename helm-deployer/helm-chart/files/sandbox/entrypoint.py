@@ -26,10 +26,6 @@ from .log_config import configure_logging, get_logger
 configure_logging()
 
 
-class StartupInterruptedError(RuntimeError):
-    """Raised when startup is interrupted by an intentional shutdown signal."""
-
-
 class SandboxSupervisor:
     """
     Supervisor process for sandbox lifecycle management.
@@ -76,7 +72,6 @@ class SandboxSupervisor:
         # Parse session config if provided
         session_config_json = os.environ.get("SESSION_CONFIG", "{}")
         self.session_config = json.loads(session_config_json)
-        self.session_id = self._resolve_session_id()
 
         # Paths
         self.workspace_path = Path("/workspace")
@@ -84,20 +79,13 @@ class SandboxSupervisor:
         self.session_id_file = Path("/tmp/opencode-session-id")
 
         # Logger
+        session_id = self.session_config.get("session_id", "")
         self.log = get_logger(
             "supervisor",
             service="sandbox",
             sandbox_id=self.sandbox_id,
-            session_id=self.session_id,
+            session_id=session_id,
         )
-
-    def _resolve_session_id(self) -> str:
-        """Resolve session ID across known naming variants."""
-        # Prefer SESSION_CONFIG values, but fall back to top-level env for robustness.
-        session_id = self.session_config.get("session_id") or self.session_config.get("sessionId")
-        if session_id:
-            return str(session_id)
-        return os.environ.get("SESSION_ID", "")
 
     @property
     def base_branch(self) -> str:
@@ -109,231 +97,6 @@ class SandboxSupervisor:
         if authenticated and self.vcs_clone_token:
             return f"https://{self.vcs_clone_username}:{self.vcs_clone_token}@{self.vcs_host}/{self.repo_owner}/{self.repo_name}.git"
         return f"https://{self.vcs_host}/{self.repo_owner}/{self.repo_name}.git"
-
-    # ------------------------------------------------------------------
-    # Git primitives
-    # ------------------------------------------------------------------
-
-    async def _clone_repo(self) -> bool:
-        """Shallow-clone the repository."""
-        self.log.info(
-            "git.clone_start",
-            repo_owner=self.repo_owner,
-            repo_name=self.repo_name,
-            authenticated=bool(self.vcs_clone_token),
-        )
-
-        clone_depth = self.CLONE_DEPTH_COMMITS if self.boot_mode == "build" else 1
-        result = await asyncio.create_subprocess_exec(
-            "git",
-            "clone",
-            "--depth",
-            str(clone_depth),
-            "--branch",
-            self.base_branch,
-            self._build_repo_url(),
-            str(self.repo_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, stderr = await result.communicate()
-
-        if result.returncode != 0:
-            self.log.error(
-                "git.clone_error",
-                stderr=stderr.decode(),
-                exit_code=result.returncode,
-            )
-            return False
-
-        self.log.info("git.clone_complete", repo_path=str(self.repo_path))
-        return True
-
-    async def _ensure_remote_auth(self) -> None:
-        """Set the remote URL with auth credentials if a clone token is available."""
-        if not self.vcs_clone_token:
-            return
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            "remote",
-            "set-url",
-            "origin",
-            self._build_repo_url(),
-            cwd=self.repo_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            self.log.warn("git.set_url_failed", exit_code=proc.returncode, stderr=stderr.decode())
-
-    async def _fetch_branch(self, branch: str) -> bool:
-        """Fetch a branch with an explicit refspec.
-
-        Uses an explicit refspec so that ``refs/remotes/origin/<branch>`` is
-        created even in shallow or single-branch clones.
-        """
-        result = await asyncio.create_subprocess_exec(
-            "git",
-            "fetch",
-            "origin",
-            f"{branch}:refs/remotes/origin/{branch}",
-            cwd=self.repo_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.log.error(
-                "git.fetch_error",
-                stderr=stderr.decode(),
-                exit_code=result.returncode,
-            )
-            return False
-        return True
-
-    async def _checkout_branch(self, branch: str) -> bool:
-        """Create/reset a local branch to match the remote tip."""
-        result = await asyncio.create_subprocess_exec(
-            "git",
-            "checkout",
-            "-B",
-            branch,
-            f"origin/{branch}",
-            cwd=self.repo_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.log.warn(
-                "git.checkout_error",
-                stderr=stderr.decode(),
-                exit_code=result.returncode,
-                target_branch=branch,
-            )
-            return False
-        return True
-
-    # ------------------------------------------------------------------
-    # Git sync methods (compose the primitives above)
-    # ------------------------------------------------------------------
-
-    async def _update_existing_repo(self) -> bool:
-        """Fetch the target branch and check it out in an existing repo.
-
-        Used by the repo-image and fresh boot paths where the working tree is
-        clean (no in-progress agent changes).
-        """
-        if not self.repo_path.exists():
-            self.log.info("git.update_skip", reason="no_repo_path")
-            return False
-
-        try:
-            await self._ensure_remote_auth()
-            branch = self.base_branch
-            if not await self._fetch_branch(branch):
-                return False
-            return await self._checkout_branch(branch)
-        except Exception as e:
-            self.log.error("git.update_error", exc=e)
-            return False
-
-    async def _fetch_and_reset_to_latest(self) -> bool:
-        """Fetch the latest from origin and reset to it, preserving uncommitted changes.
-
-        Designed for snapshot-restore boots where the working tree may contain
-        in-progress changes from a prior agent session.
-
-        Strategy:
-        1. Fetch the latest remote state.
-        2. Stash uncommitted changes (including untracked files).
-        3. Hard-reset the branch to ``origin/<branch>`` so the working tree is
-           always on the latest commit from origin.
-        4. Re-apply the stash so the agent's in-progress work survives.
-
-        Returns:
-            True if the working tree is now at the latest origin tip, False if
-            the fetch or reset failed (stash-pop conflicts are non-fatal).
-        """
-        if not self.repo_path.exists():
-            self.log.info("git.fetch_reset_skip", reason="no_repo_path")
-            return False
-
-        try:
-            await self._ensure_remote_auth()
-            branch = self.base_branch
-
-            if not await self._fetch_branch(branch):
-                return False
-
-            # Stash uncommitted changes so the hard reset can always proceed.
-            stash_proc = await asyncio.create_subprocess_exec(
-                "git",
-                "stash",
-                "--include-untracked",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stash_stdout, _ = await stash_proc.communicate()
-            did_stash = (
-                stash_proc.returncode == 0 and b"No local changes to save" not in stash_stdout
-            )
-
-            # Hard-reset to the latest remote tip — always succeeds on a clean tree.
-            reset_proc = await asyncio.create_subprocess_exec(
-                "git",
-                "reset",
-                "--hard",
-                f"origin/{branch}",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, reset_stderr = await reset_proc.communicate()
-            if reset_proc.returncode != 0:
-                self.log.error(
-                    "git.reset_hard_failed",
-                    branch=branch,
-                    stderr=reset_stderr.decode(),
-                )
-                if did_stash:
-                    # Restore stash so agent work is not lost on failure.
-                    await asyncio.create_subprocess_exec(
-                        "git",
-                        "stash",
-                        "pop",
-                        cwd=self.repo_path,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                return False
-
-            # Re-apply the agent's in-progress changes on top of the latest code.
-            if did_stash:
-                pop_proc = await asyncio.create_subprocess_exec(
-                    "git",
-                    "stash",
-                    "pop",
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                _, pop_stderr = await pop_proc.communicate()
-                if pop_proc.returncode != 0:
-                    self.log.warn(
-                        "git.stash_pop_conflict",
-                        branch=branch,
-                        stderr=pop_stderr.decode(),
-                    )
-                    # Conflict markers are left in the working tree; non-fatal.
-
-            self.log.info("git.fetch_reset_complete", branch=branch, did_stash=did_stash)
-            return True
-        except Exception as e:
-            self.log.error("git.fetch_reset_error", exc=e)
-            return False
 
     async def perform_git_sync(self) -> bool:
         """
@@ -439,41 +202,14 @@ class SandboxSupervisor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            rebase_stdout, rebase_stderr = await result.communicate()
+            await result.wait()
 
             if result.returncode != 0:
                 # Check if there's actually a rebase in progress before trying to abort
                 rebase_merge = self.repo_path / ".git" / "rebase-merge"
                 rebase_apply = self.repo_path / ".git" / "rebase-apply"
-                rebase_in_progress = rebase_merge.exists() or rebase_apply.exists()
-
-                branch_cmd = await asyncio.create_subprocess_exec(
-                    "git",
-                    "rev-parse",
-                    "--abbrev-ref",
-                    "HEAD",
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                branch_stdout, _ = await branch_cmd.communicate()
-                current_branch = branch_stdout.decode(errors="replace").strip()
-
-                status_cmd = await asyncio.create_subprocess_exec(
-                    "git",
-                    "status",
-                    "--porcelain=v1",
-                    "--branch",
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                status_stdout, _ = await status_cmd.communicate()
-
-                abort_exit_code = None
-                abort_output_tail = ""
-                if rebase_in_progress:
-                    abort_result = await asyncio.create_subprocess_exec(
+                if rebase_merge.exists() or rebase_apply.exists():
+                    await asyncio.create_subprocess_exec(
                         "git",
                         "rebase",
                         "--abort",
@@ -481,24 +217,7 @@ class SandboxSupervisor:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    abort_stdout, abort_stderr = await abort_result.communicate()
-                    abort_exit_code = abort_result.returncode
-                    abort_output_tail = self._tail_text(abort_stdout) or self._tail_text(
-                        abort_stderr
-                    )
-
-                self.log.error(
-                    "git.rebase_error",
-                    base_branch=base_branch,
-                    current_branch=current_branch,
-                    exit_code=result.returncode,
-                    rebase_in_progress=rebase_in_progress,
-                    rebase_stdout_tail=self._tail_text(rebase_stdout),
-                    rebase_stderr_tail=self._tail_text(rebase_stderr),
-                    status_tail=self._tail_text(status_stdout),
-                    abort_exit_code=abort_exit_code,
-                    abort_output_tail=abort_output_tail,
-                )
+                self.log.warn("git.rebase_error", base_branch=base_branch)
 
             # Get current SHA
             result = await asyncio.create_subprocess_exec(
@@ -611,13 +330,9 @@ class SandboxSupervisor:
                 "*": {
                     "*": "allow",
                 },
-            },
+            }
         }
 
-        # Set default agent from session config if provided
-        agent = self.session_config.get("agent")
-        if agent:
-            opencode_config["default_agent"] = agent
         # Determine working directory - use repo path if cloned, otherwise /workspace
         workdir = self.workspace_path
         if self.repo_path.exists() and (self.repo_path / ".git").exists():
@@ -683,76 +398,40 @@ class SandboxSupervisor:
         """Poll health endpoint until server is ready."""
         health_url = f"http://localhost:{self.OPENCODE_PORT}/global/health"
         start_time = time.time()
-        attempts = 0
-        connect_error_count = 0
-        last_error = ""
 
         async with httpx.AsyncClient() as client:
             while time.time() - start_time < self.HEALTH_CHECK_TIMEOUT:
                 if self.shutdown_event.is_set():
-                    raise StartupInterruptedError("Shutdown requested during startup")
+                    raise RuntimeError("Shutdown requested during startup")
 
                 try:
-                    attempts += 1
                     resp = await client.get(health_url, timeout=2.0)
                     if resp.status_code == 200:
                         return
-                    last_error = f"unexpected_status:{resp.status_code}"
-                    if attempts % 5 == 0:
-                        elapsed_ms = int((time.time() - start_time) * 1000)
-                        self.log.debug(
-                            "opencode.health_check_retry",
-                            attempts=attempts,
-                            elapsed_ms=elapsed_ms,
-                            status_code=resp.status_code,
-                        )
                 except httpx.ConnectError:
-                    connect_error_count += 1
-                    last_error = "connect_error"
-                    # Log every 5th connect failure to keep noise manageable.
-                    if connect_error_count % 5 == 0:
-                        elapsed_ms = int((time.time() - start_time) * 1000)
-                        self.log.debug(
-                            "opencode.health_check_connect_error",
-                            attempts=attempts,
-                            connect_error_count=connect_error_count,
-                            elapsed_ms=elapsed_ms,
-                            health_url=health_url,
-                        )
+                    pass
                 except Exception as e:
                     self.log.debug("opencode.health_check_error", exc=e)
 
                 await asyncio.sleep(0.5)
 
-        raise RuntimeError(
-            "OpenCode server failed to become healthy "
-            f"(attempts={attempts}, connect_errors={connect_error_count}, last_error={last_error})"
-        )
+        raise RuntimeError("OpenCode server failed to become healthy")
 
     async def start_bridge(self) -> None:
         """Start the agent bridge process."""
         self.log.info("bridge.start")
 
         if not self.control_plane_url:
-            self.log.info(
-                "bridge.skip",
-                reason="no_control_plane_url",
-                has_sandbox_token=bool(self.sandbox_token),
-            )
+            self.log.info("bridge.skip", reason="no_control_plane_url")
             return
 
         # Wait for OpenCode to be ready
         await self.opencode_ready.wait()
 
-        # Get session_id (required for WebSocket connection)
-        session_id = self.session_id
+        # Get session_id from config (required for WebSocket connection)
+        session_id = self.session_config.get("session_id", "")
         if not session_id:
-            self.log.info(
-                "bridge.skip",
-                reason="no_session_id",
-                control_plane_url=self.control_plane_url,
-                has_sandbox_token=bool(self.sandbox_token),
-            )
+            self.log.info("bridge.skip", reason="no_session_id")
             return
 
         # Run bridge as a module (works with relative imports)
@@ -791,10 +470,7 @@ class SandboxSupervisor:
                 self.log.error(
                     "bridge.startup_crash",
                     exit_code=exit_code,
-                    output_tail=self._tail_text(stdout),
-                    control_plane_url=self.control_plane_url,
-                    has_sandbox_token=bool(self.sandbox_token),
-                    session_id=session_id,
+                    output=stdout.decode() if stdout else "",
                 )
 
     async def _forward_bridge_logs(self) -> None:
@@ -972,24 +648,12 @@ class SandboxSupervisor:
 
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(
+                await client.post(
                     f"{self.control_plane_url}/sandbox/{self.sandbox_id}/error",
                     json={"error": message, "fatal": True},
                     headers={"Authorization": f"Bearer {self.sandbox_token}"},
                     timeout=5.0,
                 )
-                if response.status_code >= 400:
-                    self.log.error(
-                        "supervisor.report_error_rejected",
-                        status_code=response.status_code,
-                        response_body=self._tail_text(response.text.encode(), max_lines=20),
-                        has_sandbox_token=bool(self.sandbox_token),
-                    )
-                else:
-                    self.log.info(
-                        "supervisor.report_error_sent",
-                        status_code=response.status_code,
-                    )
         except Exception as e:
             self.log.error("supervisor.report_error_failed", exc=e)
 
@@ -1337,13 +1001,9 @@ class SandboxSupervisor:
         try:
             # Phase 1: Git sync
             if restored_from_snapshot:
-                git_sync_success = await self._fetch_and_reset_to_latest()
-                if not git_sync_success:
-                    self.log.warn(
-                        "git.snapshot_sync_failed",
-                        note="proceeding_with_snapshot_state",
-                    )
-                    git_sync_success = True  # Non-fatal: session can still run on snapshot code
+                await self._quick_git_fetch()
+                self.git_sync_complete.set()
+                git_sync_success = True
             elif from_repo_image:
                 git_sync_success = await self._incremental_git_sync()
             else:
@@ -1404,10 +1064,6 @@ class SandboxSupervisor:
             # Phase 7: Monitor processes
             await self.monitor_processes()
 
-        except StartupInterruptedError:
-            # A signal arrived while we were still booting; this is a normal
-            # shutdown path and should not be reported as a fatal sandbox error.
-            self.log.info("supervisor.startup_interrupted")
         except Exception as e:
             self.log.error("supervisor.error", exc=e)
             await self._report_fatal_error(str(e))

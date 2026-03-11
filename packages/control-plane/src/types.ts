@@ -115,7 +115,7 @@ export interface SessionResponse {
   currentSha: string | null;
   opencodeSessionId: string | null;
   status: SessionStatus;
-  mode: string | null;
+  mode: "plan" | "apply" | null;
   createdAt: number;
   updatedAt: number;
 }

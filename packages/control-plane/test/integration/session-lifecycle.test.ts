@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import type { SessionDO } from "../../src/session/durable-object";
-import { initSession, queryDO, seedSandboxAuthHash } from "./helpers";
+import { initSession, seedSandboxAuthHash } from "./helpers";
 
 describe("GET /internal/state", () => {
   it("state includes sandbox after init", async () => {
@@ -121,104 +121,6 @@ describe("POST /internal/prompt", () => {
       expect(state.status).toBe("active");
     }
   );
-});
-
-describe("POST /internal/init — mode and sandboxProvider persistence", () => {
-  it("persists mode and sandboxProvider to DO SQLite when both are provided", async () => {
-    const { stub } = await initSession({ mode: "apply", sandboxProvider: "ec2" });
-
-    const rows = await queryDO<{ mode: string | null; sandbox_provider: string | null }>(
-      stub,
-      "SELECT mode, sandbox_provider FROM session"
-    );
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0].mode).toBe("apply");
-    expect(rows[0].sandbox_provider).toBe("ec2");
-  });
-
-  it("persists mode:plan and sandboxProvider:helm to DO SQLite", async () => {
-    const { stub } = await initSession({ mode: "plan", sandboxProvider: "helm" });
-
-    const rows = await queryDO<{ mode: string | null; sandbox_provider: string | null }>(
-      stub,
-      "SELECT mode, sandbox_provider FROM session"
-    );
-
-    expect(rows[0].mode).toBe("plan");
-    expect(rows[0].sandbox_provider).toBe("helm");
-  });
-
-  it("persists mode:code_review with no sandboxProvider to DO SQLite", async () => {
-    const { stub } = await initSession({ mode: "code_review" });
-
-    const rows = await queryDO<{ mode: string | null; sandbox_provider: string | null }>(
-      stub,
-      "SELECT mode, sandbox_provider FROM session"
-    );
-
-    expect(rows[0].mode).toBe("code_review");
-    expect(rows[0].sandbox_provider).toBeNull();
-  });
-
-  it("stores NULL for both mode and sandboxProvider when neither is provided", async () => {
-    const { stub } = await initSession();
-
-    const rows = await queryDO<{ mode: string | null; sandbox_provider: string | null }>(
-      stub,
-      "SELECT mode, sandbox_provider FROM session"
-    );
-
-    expect(rows[0].mode).toBeNull();
-    expect(rows[0].sandbox_provider).toBeNull();
-  });
-
-  it("stores NULL for mode and sandboxProvider when explicitly set to null", async () => {
-    const { stub } = await initSession({ mode: null, sandboxProvider: null });
-
-    const rows = await queryDO<{ mode: string | null; sandbox_provider: string | null }>(
-      stub,
-      "SELECT mode, sandbox_provider FROM session"
-    );
-
-    expect(rows[0].mode).toBeNull();
-    expect(rows[0].sandbox_provider).toBeNull();
-  });
-
-  it("persists sandboxProvider:modal to DO SQLite", async () => {
-    const { stub } = await initSession({ sandboxProvider: "modal" });
-
-    const rows = await queryDO<{ sandbox_provider: string | null }>(
-      stub,
-      "SELECT sandbox_provider FROM session"
-    );
-
-    expect(rows[0].sandbox_provider).toBe("modal");
-  });
-
-  it("mode and sandboxProvider are independent — mode without provider stores NULL provider", async () => {
-    const { stub } = await initSession({ mode: "apply" });
-
-    const rows = await queryDO<{ mode: string | null; sandbox_provider: string | null }>(
-      stub,
-      "SELECT mode, sandbox_provider FROM session"
-    );
-
-    expect(rows[0].mode).toBe("apply");
-    expect(rows[0].sandbox_provider).toBeNull();
-  });
-
-  it("sandboxProvider without mode stores NULL mode", async () => {
-    const { stub } = await initSession({ sandboxProvider: "ec2" });
-
-    const rows = await queryDO<{ mode: string | null; sandbox_provider: string | null }>(
-      stub,
-      "SELECT mode, sandbox_provider FROM session"
-    );
-
-    expect(rows[0].mode).toBeNull();
-    expect(rows[0].sandbox_provider).toBe("ec2");
-  });
 });
 
 describe("POST /internal/verify-sandbox-token", () => {
