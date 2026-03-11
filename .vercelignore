@@ -1,7 +1,5 @@
-# Exclude Terraform and secrets from Vercel deployments (CLI and Git).
-# tfvars may contain secrets and must never be sent to Vercel.
-terraform/
-*.tfvars
-**/*.tfvars
-backend.tfvars
-**/backend.tfvars
+# Ignore everything (folders and files) on root only
+/*
+!package.json
+!package-lock.json
+!packages

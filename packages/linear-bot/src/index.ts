@@ -156,6 +156,10 @@ app.post("/webhook", async (c) => {
     return c.json({ error: "Invalid payload" }, 400);
   }
 
+  if (c.env.LOG_WEBHOOK_PAYLOAD === "true") {
+    log.info("webhook.raw_payload", { trace_id: traceId, payload: body });
+  }
+
   const eventType = readStringField(payload, "type") ?? "unknown";
   const action = readStringField(payload, "action") ?? "unknown";
 

@@ -18,6 +18,8 @@ interface DeployBody {
   repoName: string;
   userEnvVars?: Record<string, string>;
   model: string;
+  branch?: string;
+  agent?: string;
 }
 
 interface ProviderObjectBody {
@@ -377,6 +379,7 @@ CONTROL_PLANE_URL=${config.controlPlaneUrl}
 SANDBOX_AUTH_TOKEN=${config.sandboxAuthToken}
 LLM_PROVIDER=${config.provider}
 LLM_MODEL=${config.model}
+SESSION_CONFIG='{"session_id":"${config.sessionId}","provider":"${config.provider}","model":"${config.model}","branch":"${config.branch ?? "main"}","agent":"${config.agent ?? "orchestrator"}"}'
 REPO_OWNER=${config.repoOwner}
 REPO_NAME=${config.repoName}
 VCS_CLONE_TOKEN=${config.userEnvVars?.["VCS_CLONE_TOKEN"] || config.userEnvVars?.["GITHUB_APP_TOKEN"] || config.userEnvVars?.["GITHUB_TOKEN"] || ""}

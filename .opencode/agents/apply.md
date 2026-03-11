@@ -3,7 +3,6 @@ description:
   Implements discrete coding tasks from specs with acceptance criteria, verifying each
   implementation before completion
 mode: subagent
-model: anthropic/claude-sonnet-4-6-1m
 temperature: 0.2
 tools:
   write: true

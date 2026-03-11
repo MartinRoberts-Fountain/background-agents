@@ -212,8 +212,8 @@ class SandboxSupervisor:
     async def _update_existing_repo(self) -> bool:
         """Fetch the target branch and check it out in an existing repo.
 
-        Used by both snapshot-restore and repo-image boot paths where the
-        repository already exists on disk.
+        Used by the repo-image and fresh boot paths where the working tree is
+        clean (no in-progress agent changes).
         """
         if not self.repo_path.exists():
             self.log.info("git.update_skip", reason="no_repo_path")
@@ -227,6 +227,102 @@ class SandboxSupervisor:
             return await self._checkout_branch(branch)
         except Exception as e:
             self.log.error("git.update_error", exc=e)
+            return False
+
+    async def _fetch_and_reset_to_latest(self) -> bool:
+        """Fetch the latest from origin and reset to it, preserving uncommitted changes.
+
+        Designed for snapshot-restore boots where the working tree may contain
+        in-progress changes from a prior agent session.
+
+        Strategy:
+        1. Fetch the latest remote state.
+        2. Stash uncommitted changes (including untracked files).
+        3. Hard-reset the branch to ``origin/<branch>`` so the working tree is
+           always on the latest commit from origin.
+        4. Re-apply the stash so the agent's in-progress work survives.
+
+        Returns:
+            True if the working tree is now at the latest origin tip, False if
+            the fetch or reset failed (stash-pop conflicts are non-fatal).
+        """
+        if not self.repo_path.exists():
+            self.log.info("git.fetch_reset_skip", reason="no_repo_path")
+            return False
+
+        try:
+            await self._ensure_remote_auth()
+            branch = self.base_branch
+
+            if not await self._fetch_branch(branch):
+                return False
+
+            # Stash uncommitted changes so the hard reset can always proceed.
+            stash_proc = await asyncio.create_subprocess_exec(
+                "git",
+                "stash",
+                "--include-untracked",
+                cwd=self.repo_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stash_stdout, _ = await stash_proc.communicate()
+            did_stash = (
+                stash_proc.returncode == 0 and b"No local changes to save" not in stash_stdout
+            )
+
+            # Hard-reset to the latest remote tip — always succeeds on a clean tree.
+            reset_proc = await asyncio.create_subprocess_exec(
+                "git",
+                "reset",
+                "--hard",
+                f"origin/{branch}",
+                cwd=self.repo_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, reset_stderr = await reset_proc.communicate()
+            if reset_proc.returncode != 0:
+                self.log.error(
+                    "git.reset_hard_failed",
+                    branch=branch,
+                    stderr=reset_stderr.decode(),
+                )
+                if did_stash:
+                    # Restore stash so agent work is not lost on failure.
+                    await asyncio.create_subprocess_exec(
+                        "git",
+                        "stash",
+                        "pop",
+                        cwd=self.repo_path,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                return False
+
+            # Re-apply the agent's in-progress changes on top of the latest code.
+            if did_stash:
+                pop_proc = await asyncio.create_subprocess_exec(
+                    "git",
+                    "stash",
+                    "pop",
+                    cwd=self.repo_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, pop_stderr = await pop_proc.communicate()
+                if pop_proc.returncode != 0:
+                    self.log.warn(
+                        "git.stash_pop_conflict",
+                        branch=branch,
+                        stderr=pop_stderr.decode(),
+                    )
+                    # Conflict markers are left in the working tree; non-fatal.
+
+            self.log.info("git.fetch_reset_complete", branch=branch, did_stash=did_stash)
+            return True
+        except Exception as e:
+            self.log.error("git.fetch_reset_error", exc=e)
             return False
 
     async def perform_git_sync(self) -> bool:
@@ -822,8 +918,13 @@ class SandboxSupervisor:
         try:
             # Phase 1: Git sync
             if restored_from_snapshot:
-                await self._update_existing_repo()  # best-effort
-                git_sync_success = True
+                git_sync_success = await self._fetch_and_reset_to_latest()
+                if not git_sync_success:
+                    self.log.warn(
+                        "git.snapshot_sync_failed",
+                        note="proceeding_with_snapshot_state",
+                    )
+                    git_sync_success = True  # Non-fatal: session can still run on snapshot code
             elif from_repo_image:
                 git_sync_success = await self._update_existing_repo()
             else:

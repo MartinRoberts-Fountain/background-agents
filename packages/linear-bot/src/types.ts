@@ -31,6 +31,7 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
   INTERNAL_CALLBACK_SECRET?: string;
   LOG_LEVEL?: string;
+  LOG_WEBHOOK_PAYLOAD?: string;
 }
 
 // ─── OAuth Types ─────────────────────────────────────────────────────────────

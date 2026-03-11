@@ -801,24 +801,8 @@ export async function handleIssueStatusChange(
     createdAt: Date.now(),
   });
 
-  // Build prompt — plan output is already on the Linear ticket and will be
-  // included in promptContext for new agent sessions automatically.
-  const promptParts: string[] = [
-    `Linear Issue: ${issueData.identifier} — ${issueData.title}`,
-    `URL: ${issueData.url}`,
-    "",
-  ];
-
-  if (issueData.description) {
-    promptParts.push(issueData.description);
-  } else {
-    promptParts.push("(No description provided)");
-  }
-
   const applySystemPrompt = await fetchModeSystemPrompt(env, headers, "apply");
-  if (applySystemPrompt) {
-    promptParts.push("", applySystemPrompt);
-  }
+  const prompt = buildPrompt(issueData, issueDetails, null, "apply", applySystemPrompt);
 
   const callbackContext: CallbackContext = {
     source: "linear",
@@ -838,7 +822,7 @@ export async function handleIssueStatusChange(
       method: "POST",
       headers,
       body: JSON.stringify({
-        content: promptParts.join("\n"),
+        content: prompt,
         source: "linear",
         callbackContext,
       }),

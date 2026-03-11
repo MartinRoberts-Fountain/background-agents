@@ -3,7 +3,6 @@ description:
   Writes meaningful failing tests from task specs using TDD, verifying RED before handing off to
   @make
 mode: subagent
-model: anthropic/claude-sonnet-4-6-1m
 temperature: 0.2
 tools:
   write: true
