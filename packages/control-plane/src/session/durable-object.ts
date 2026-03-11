@@ -153,12 +153,13 @@ export class SessionDO extends DurableObject<Env> {
     listEvents: (_request, url) => this.messagesHandler.listEvents(url),
     listArtifacts: () => this.messagesHandler.listArtifacts(),
     listMessages: (_request, url) => this.messagesHandler.listMessages(url),
-    createPr: (request) => this.pullRequestHandler.createPr(request),
     wsToken: (request) => this.wsTokenHandler.generateWsToken(request),
     archive: (request) => this.sessionLifecycleHandler.archive(request),
     unarchive: (request) => this.sessionLifecycleHandler.unarchive(request),
+    createPr: (request) => this.pullRequestHandler.createPr(request),
     verifySandboxToken: (request) => this.sandboxHandler.verifySandboxToken(request),
     openaiTokenRefresh: () => this.sandboxHandler.openaiTokenRefresh(),
+    vcsTokenRefresh: () => this.handleVcsTokenRefresh(),
     spawnContext: () => this.childSessionsHandler.getSpawnContext(),
     childSummary: () => this.childSessionsHandler.getChildSummary(),
     cancel: () => this.sessionLifecycleHandler.cancel(),
@@ -1631,6 +1632,137 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     return false;
+  }
+
+  /**
+   * Verify a sandbox authentication token.
+   * Called by the router to validate sandbox-originated requests.
+   */
+  private async handleVerifySandboxToken(request: Request): Promise<Response> {
+    const body = (await request.json()) as { token: string };
+
+    if (!body.token) {
+      return new Response(JSON.stringify({ valid: false, error: "Missing token" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const sandbox = this.getSandbox();
+    if (!sandbox) {
+      this.log.warn("Sandbox token verification failed: no sandbox");
+      return new Response(JSON.stringify({ valid: false, error: "No sandbox" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // Check if sandbox is in an active state
+    if (sandbox.status === "stopped" || sandbox.status === "stale") {
+      this.log.warn("Sandbox token verification failed: sandbox is stopped/stale", {
+        status: sandbox.status,
+      });
+      return new Response(JSON.stringify({ valid: false, error: "Sandbox stopped" }), {
+        status: 410,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // Validate the token
+    const isTokenValid = await this.isValidSandboxToken(body.token, sandbox);
+    if (!isTokenValid) {
+      this.log.warn("Sandbox token verification failed: token mismatch");
+      return new Response(JSON.stringify({ valid: false, error: "Invalid token" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    this.log.info("Sandbox token verified successfully");
+    return new Response(JSON.stringify({ valid: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  /**
+   * Handle OpenAI token refresh.
+   * Reads the refresh token from D1 secrets, calls OpenAI, stores the rotated
+   * token back, and returns only the access token to the sandbox.
+   */
+  private async handleOpenAITokenRefresh(): Promise<Response> {
+    const session = this.getSession();
+    if (!session) {
+      return this.openAIRefreshJsonResponse({ error: "No session" }, 404);
+    }
+
+    const encryptionKey = this.env.REPO_SECRETS_ENCRYPTION_KEY;
+    if (!this.env.DB || !encryptionKey) {
+      return this.openAIRefreshJsonResponse({ error: "Secrets not configured" }, 500);
+    }
+
+    const service = new OpenAITokenRefreshService(
+      this.env.DB,
+      encryptionKey,
+      (sessionRow) => this.ensureRepoId(sessionRow),
+      this.log
+    );
+
+    const result = await service.refresh(session);
+    if (!result.ok) {
+      return this.openAIRefreshJsonResponse({ error: result.error }, result.status);
+    }
+
+    return this.openAIRefreshJsonResponse(
+      {
+        access_token: result.accessToken,
+        expires_in: result.expiresIn,
+        account_id: result.accountId,
+      },
+      200
+    );
+  }
+
+  private openAIRefreshJsonResponse(body: unknown, status: number): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  /**
+   * Handle VCS (GitHub App) token refresh for the sandbox.
+   * Generates a fresh installation token for git operations.
+   */
+  private async handleVcsTokenRefresh(): Promise<Response> {
+    try {
+      const pushAuth = await this.sourceControlProvider.generatePushAuth();
+      this.log.info("VCS token refreshed for sandbox");
+
+      return new Response(
+        JSON.stringify({
+          token: pushAuth.token,
+          authType: pushAuth.authType,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    } catch (error) {
+      this.log.error("VCS token refresh failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return new Response(
+        JSON.stringify({
+          error: error instanceof Error ? error.message : "Failed to generate VCS token",
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
   }
 
   private updateSandboxStatus(status: string): void {
