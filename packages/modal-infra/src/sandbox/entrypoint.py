@@ -442,6 +442,10 @@ class SandboxSupervisor:
             },
         }
 
+        # Set default agent from session config if provided
+        agent = self.session_config.get("agent")
+        if agent:
+            opencode_config["default_agent"] = agent
         # Determine working directory - use repo path if cloned, otherwise /workspace
         workdir = self.workspace_path
         if self.repo_path.exists() and (self.repo_path / ".git").exists():

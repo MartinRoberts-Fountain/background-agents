@@ -372,9 +372,8 @@ export class EC2InstanceDO extends DurableObject<Env> {
 
 # Write dynamic environment for OpenCode server
 cat > /etc/opencode/env <<EOF
-PATH="/home/ubuntu/.nvm/versions/node/v22.19.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+PATH="/workspace/${config.repoName}/node_modules/.bin:/home/ubuntu/.nvm/versions/node/v22.19.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
 SANDBOX_ID=${config.sandboxId}
-SESSION_ID=${config.sessionId}
 CONTROL_PLANE_URL=${config.controlPlaneUrl}
 SANDBOX_AUTH_TOKEN=${config.sandboxAuthToken}
 LLM_PROVIDER=${config.provider}
