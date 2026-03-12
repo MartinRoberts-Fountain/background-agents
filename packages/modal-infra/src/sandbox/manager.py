@@ -100,6 +100,7 @@ class SandboxManager:
                 # Required by gh CLI and git push operations in the sandbox
                 env_vars["GITHUB_APP_TOKEN"] = clone_token
                 env_vars["GITHUB_TOKEN"] = clone_token
+                env_vars["GH_TOKEN"] = clone_token
 
     async def create_sandbox(
         self,

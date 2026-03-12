@@ -343,6 +343,7 @@ async def test_vcs_env_vars_default_github(monkeypatch):
     assert env["VCS_CLONE_TOKEN"] == "ghp_test123"
     assert env["GITHUB_APP_TOKEN"] == "ghp_test123"
     assert env["GITHUB_TOKEN"] == "ghp_test123"
+    assert env["GH_TOKEN"] == "ghp_test123"
 
 
 @pytest.mark.asyncio
@@ -388,6 +389,7 @@ async def test_vcs_env_vars_bitbucket(monkeypatch):
     # GitHub-specific vars not set for Bitbucket
     assert "GITHUB_APP_TOKEN" not in env
     assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env
 
 
 @pytest.mark.asyncio
@@ -410,6 +412,7 @@ async def test_vcs_env_vars_no_token(monkeypatch):
     assert "VCS_CLONE_TOKEN" not in env
     assert "GITHUB_APP_TOKEN" not in env
     assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env
 
 
 @pytest.mark.asyncio
@@ -444,3 +447,4 @@ async def test_restore_vcs_env_vars(monkeypatch):
     # GitHub-specific vars not set for Bitbucket
     assert "GITHUB_APP_TOKEN" not in env
     assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env

@@ -382,6 +382,9 @@ SESSION_CONFIG='{"session_id":"${config.sessionId}","provider":"${config.provide
 REPO_OWNER=${config.repoOwner}
 REPO_NAME=${config.repoName}
 VCS_CLONE_TOKEN=${config.userEnvVars?.["VCS_CLONE_TOKEN"] || config.userEnvVars?.["GITHUB_APP_TOKEN"] || config.userEnvVars?.["GITHUB_TOKEN"] || ""}
+GITHUB_TOKEN=${config.userEnvVars?.["GITHUB_TOKEN"] || config.userEnvVars?.["VCS_CLONE_TOKEN"] || ""}
+GH_TOKEN=${config.userEnvVars?.["GH_TOKEN"] || config.userEnvVars?.["VCS_CLONE_TOKEN"] || ""}
+GITHUB_APP_TOKEN=${config.userEnvVars?.["GITHUB_APP_TOKEN"] || config.userEnvVars?.["VCS_CLONE_TOKEN"] || ""}
 ANTHROPIC_API_KEY=${config.userEnvVars?.["ANTHROPIC_API_KEY"] || ""}
 EOF
 

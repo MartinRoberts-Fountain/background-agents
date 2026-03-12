@@ -387,6 +387,36 @@ class SandboxSupervisor:
         if not package_json.exists():
             package_json.write_text('{"name": "opencode-tools", "type": "module"}')
 
+    def _setup_gh_cli(self) -> None:
+        """Configure gh CLI with the token if available."""
+        token = self.vcs_clone_token
+        if not token or self.vcs_host != "github.com":
+            return
+
+        try:
+            gh_config_dir = Path.home() / ".config" / "gh"
+            gh_config_dir.mkdir(parents=True, exist_ok=True)
+
+            hosts_file = gh_config_dir / "hosts.yml"
+            # gh expects YAML. For github.com, we provide the token.
+            hosts_content = (
+                f"github.com:\n"
+                f"    user: {self.vcs_clone_username}\n"
+                f"    oauth_token: {token}\n"
+                f"    git_protocol: https\n"
+            )
+
+            # Write with 0600 permissions
+            fd = os.open(str(hosts_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, hosts_content.encode())
+            finally:
+                os.close(fd)
+
+            self.log.info("gh_cli.setup", hosts_file=str(hosts_file))
+        except Exception as e:
+            self.log.warn("gh_cli.setup_error", exc=e)
+
     def _setup_openai_oauth(self) -> None:
         """Write OpenCode auth.json for ChatGPT OAuth if refresh token is configured."""
         refresh_token = os.environ.get("OPENAI_OAUTH_REFRESH_TOKEN")
@@ -903,6 +933,9 @@ class SandboxSupervisor:
 
         # Expose boot mode to repo hooks and child processes.
         os.environ["OPENINSPECT_BOOT_MODE"] = self.boot_mode
+
+        # Set up gh CLI config for GitHub repositories.
+        self._setup_gh_cli()
 
         if image_build_mode:
             self.log.info("supervisor.image_build_mode")

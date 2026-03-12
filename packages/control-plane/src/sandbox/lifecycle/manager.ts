@@ -137,6 +137,8 @@ export interface SandboxLifecycleConfig {
   inactivity: InactivityConfig;
   heartbeat: HeartbeatConfig;
   controlPlaneUrl: string;
+  /** SCM provider name (e.g., "github", "bitbucket") */
+  scmProvider: string;
   /** Default model ID used when the session has no model override. */
   model: string;
   /** Session ID for log correlation. Optional — logs will omit sessionId if not provided. */
@@ -212,6 +214,23 @@ export class SandboxLifecycleManager {
     private readonly repoImageLookup?: RepoImageLookup
   ) {
     this.log = config.sessionId ? log.child({ session_id: config.sessionId }) : log;
+  }
+
+  /**
+   * Inject version control environment variables into the sandbox environment.
+   */
+  private async injectVcsEnvVars(userEnvVars: Record<string, string>): Promise<void> {
+    const vcsToken = await this.storage.getVcsToken();
+    if (vcsToken) {
+      if (!userEnvVars["VCS_CLONE_TOKEN"]) {
+        userEnvVars["VCS_CLONE_TOKEN"] = vcsToken;
+      }
+      if (this.config.scmProvider === "github") {
+        if (!userEnvVars["GITHUB_TOKEN"]) userEnvVars["GITHUB_TOKEN"] = vcsToken;
+        if (!userEnvVars["GH_TOKEN"]) userEnvVars["GH_TOKEN"] = vcsToken;
+        if (!userEnvVars["GITHUB_APP_TOKEN"]) userEnvVars["GITHUB_APP_TOKEN"] = vcsToken;
+      }
+    }
   }
 
   /**
@@ -353,12 +372,7 @@ export class SandboxLifecycleManager {
       });
 
       const userEnvVars = (await this.storage.getUserEnvVars()) || {};
-
-      // Inject VCS clone token if available
-      const vcsToken = await this.storage.getVcsToken();
-      if (vcsToken && !userEnvVars["VCS_CLONE_TOKEN"]) {
-        userEnvVars["VCS_CLONE_TOKEN"] = vcsToken;
-      }
+      await this.injectVcsEnvVars(userEnvVars);
 
       const { provider, model: modelId } = this.resolveProviderAndModel(session);
 
@@ -505,12 +519,7 @@ export class SandboxLifecycleManager {
       });
 
       const userEnvVars = (await this.storage.getUserEnvVars()) || {};
-
-      // Inject VCS clone token if available
-      const vcsToken = await this.storage.getVcsToken();
-      if (vcsToken && !userEnvVars["VCS_CLONE_TOKEN"]) {
-        userEnvVars["VCS_CLONE_TOKEN"] = vcsToken;
-      }
+      await this.injectVcsEnvVars(userEnvVars);
 
       const { provider, model: modelId } = this.resolveProviderAndModel(session);
 

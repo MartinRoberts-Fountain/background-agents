@@ -256,6 +256,7 @@ function createTestConfig(): SandboxLifecycleConfig {
     ...DEFAULT_LIFECYCLE_CONFIG,
     controlPlaneUrl: "https://test.workers.dev",
     model: "anthropic/claude-sonnet-4-5",
+    scmProvider: "github",
   };
 }
 
@@ -309,12 +310,49 @@ describe("SandboxLifecycleManager", () => {
         wsManager,
         alarmScheduler,
         idGenerator,
-        createTestConfig()
+        { ...createTestConfig(), scmProvider: "bitbucket" }
       );
 
       await manager.spawnSandbox();
 
-      expect(provider.createSandbox).toHaveBeenCalledWith(expect.objectContaining({ userEnvVars }));
+      expect(provider.createSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userEnvVars: expect.objectContaining(userEnvVars),
+        })
+      );
+    });
+
+    it("injects GitHub tokens when scmProvider is github", async () => {
+      const sandbox = createMockSandbox({ status: "pending", created_at: Date.now() - 60000 });
+      const storage = createMockStorage(createMockSession(), sandbox);
+      const broadcaster = createMockBroadcaster();
+      const wsManager = createMockWebSocketManager(false);
+      const alarmScheduler = createMockAlarmScheduler();
+      const idGenerator = createMockIdGenerator();
+      const provider = createMockProvider();
+
+      const manager = new SandboxLifecycleManager(
+        provider,
+        storage,
+        broadcaster,
+        wsManager,
+        alarmScheduler,
+        idGenerator,
+        { ...createTestConfig(), scmProvider: "github" }
+      );
+
+      await manager.spawnSandbox();
+
+      expect(provider.createSandbox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userEnvVars: expect.objectContaining({
+            VCS_CLONE_TOKEN: "test-vcs-token",
+            GITHUB_TOKEN: "test-vcs-token",
+            GH_TOKEN: "test-vcs-token",
+            GITHUB_APP_TOKEN: "test-vcs-token",
+          }),
+        })
+      );
     });
 
     it("respects circuit breaker blocking", async () => {

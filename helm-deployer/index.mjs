@@ -262,7 +262,7 @@ async function handleDeploy(body) {
   if (userEnvVars) {
     for (const [key, value] of Object.entries(userEnvVars)) {
       // Skip keys already handled above
-      if (!["ANTHROPIC_API_KEY", "VCS_CLONE_TOKEN", "GITHUB_APP_TOKEN", "GITHUB_TOKEN"].includes(key)) {
+      if (!["ANTHROPIC_API_KEY", "VCS_CLONE_TOKEN", "GITHUB_APP_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"].includes(key)) {
         setArgs.push(`sandbox.userEnvVars.${key}=${value}`);
       }
     }

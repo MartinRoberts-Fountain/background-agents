@@ -58,6 +58,26 @@ export default tool({
       if (process.env.SCM_PROVIDER === "github" || vcsHost === "github.com") {
         process.env.GITHUB_APP_TOKEN = token
         process.env.GITHUB_TOKEN = token
+        process.env.GH_TOKEN = token
+
+        // Also update gh CLI config
+        try {
+          const path = await import("path")
+          const fs = await import("fs")
+          const ghConfigDir = path.join(process.env.HOME || "/root", ".config", "gh")
+          fs.mkdirSync(ghConfigDir, { recursive: true })
+
+          const hostsFile = path.join(ghConfigDir, "hosts.yml")
+          const hostsContent = [
+            "github.com:",
+            `    user: ${vcsCloneUsername}`,
+            `    oauth_token: ${token}`,
+            "    git_protocol: https",
+          ].join("\n") + "\n"
+          fs.writeFileSync(hostsFile, hostsContent, { mode: 0o600 })
+        } catch (e) {
+          // Best effort
+        }
       }
 
       return [
