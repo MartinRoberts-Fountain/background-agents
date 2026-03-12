@@ -153,6 +153,7 @@ export const DEFAULT_LIFECYCLE_CONFIG: Omit<SandboxLifecycleConfig, "controlPlan
   spawn: DEFAULT_SPAWN_CONFIG,
   inactivity: DEFAULT_INACTIVITY_CONFIG,
   heartbeat: DEFAULT_HEARTBEAT_CONFIG,
+  scmProvider: "github",
 };
 
 /** Child (agent-spawned) sessions get a shorter sandbox timeout. */
