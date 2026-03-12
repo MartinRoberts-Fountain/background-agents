@@ -157,11 +157,11 @@ async def test_injects_vcs_env_vars_with_token(monkeypatch):
     await manager.create_build_sandbox(
         repo_owner="acme",
         repo_name="my-repo",
-        clone_token="ghp_test_token",
+        clone_token="dummy_token_test_token",
     )
 
     env = captured["env"]
-    assert env["VCS_CLONE_TOKEN"] == "ghp_test_token"
+    assert env["VCS_CLONE_TOKEN"] == "dummy_token_test_token"
     assert env["VCS_HOST"] == "github.com"
 
 

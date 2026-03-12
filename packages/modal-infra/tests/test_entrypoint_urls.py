@@ -26,11 +26,11 @@ class TestBuildRepoUrl:
             {
                 "VCS_HOST": "github.com",
                 "VCS_CLONE_USERNAME": "x-access-token",
-                "VCS_CLONE_TOKEN": "ghp_abc123",
+                "VCS_CLONE_TOKEN": "dummy_token_abc123",
             }
         )
         url = sup._build_repo_url()
-        assert url == "https://x-access-token:ghp_abc123@github.com/acme/app.git"
+        assert url == "https://x-access-token:dummy_token_abc123@github.com/acme/app.git"
 
     def test_github_unauthenticated(self):
         sup = _make_supervisor(
@@ -69,7 +69,7 @@ class TestBuildRepoUrl:
             {
                 "VCS_HOST": "github.com",
                 "VCS_CLONE_USERNAME": "x-access-token",
-                "VCS_CLONE_TOKEN": "ghp_abc123",
+                "VCS_CLONE_TOKEN": "dummy_token_abc123",
             }
         )
         url = sup._build_repo_url(authenticated=False)
@@ -87,8 +87,8 @@ class TestBuildRepoUrl:
             {
                 "VCS_HOST": "github.com",
                 "VCS_CLONE_USERNAME": "x-access-token",
-                "GITHUB_APP_TOKEN": "ghp_legacy",
+                "GITHUB_APP_TOKEN": "dummy_token_legacy",
             }
         )
         url = sup._build_repo_url()
-        assert url == "https://x-access-token:ghp_legacy@github.com/acme/app.git"
+        assert url == "https://x-access-token:dummy_token_legacy@github.com/acme/app.git"

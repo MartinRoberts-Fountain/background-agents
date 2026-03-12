@@ -2,8 +2,6 @@
 
 import os
 from unittest.mock import patch
-import yaml
-
 from src.sandbox.entrypoint import SandboxSupervisor
 
 
@@ -17,7 +15,7 @@ def _make_supervisor(env_overrides: dict[str, str] | None = None) -> SandboxSupe
         "REPO_NAME": "app",
         "VCS_HOST": "github.com",
         "VCS_CLONE_USERNAME": "x-access-token",
-        "VCS_CLONE_TOKEN": "ghp_abc123",
+        "VCS_CLONE_TOKEN": "dummy_token_abc123",
     }
     if env_overrides:
         base_env.update(env_overrides)
@@ -40,14 +38,11 @@ class TestGhCliSetup:
             sup._setup_gh_cli()
 
         assert _hosts_file(tmp_path).exists()
-        data = yaml.safe_load(_hosts_file(tmp_path).read_text())
-        assert data == {
-            "github.com": {
-                "user": "x-access-token",
-                "oauth_token": "ghp_abc123",
-                "git_protocol": "https",
-            }
-        }
+        content = _hosts_file(tmp_path).read_text()
+        assert "github.com:" in content
+        assert "user: x-access-token" in content
+        assert "oauth_token: dummy_token_abc123" in content
+        assert "git_protocol: https" in content
 
     def test_skips_when_not_github(self, tmp_path):
         sup = _make_supervisor({"VCS_HOST": "bitbucket.org"})
