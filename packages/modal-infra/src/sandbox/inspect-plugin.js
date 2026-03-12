@@ -67,6 +67,7 @@ export default tool({
       console.log("[create-pull-request] Running 'npm run pr-ready --if-present'...")
       await execFileAsync("npm", ["run", "pr-ready", "--if-present"], {
         timeout: 60000, // 1 minute timeout
+        cwd: process.cwd(),
       })
     } catch (e) {
       console.log("[create-pull-request] pr-ready hook failed:", e.message)
