@@ -8,7 +8,7 @@ locals {
 
   # Web app URL depends on deployment platform
   web_app_url = var.web_platform == "cloudflare" ? (
-    "https://open-inspect-web-${local.name_suffix}.${var.cloudflare_worker_subdomain}.workers.dev"
+    "https://coding-agent.internal.fountain.com"
     ) : (
     "https://open-inspect-${local.name_suffix}.vercel.app"
   )

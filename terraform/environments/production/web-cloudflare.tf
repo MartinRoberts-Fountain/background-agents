@@ -61,6 +61,17 @@ resource "local_file" "web_app_wrangler_production" {
     main = ".open-next/worker.js"
     compatibility_date = "2025-08-15"
     compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+    workers_dev = false
+
+    [[routes]]
+    pattern = "coding-agent.internal.fountain.com"
+    custom_domain = true
+
+    [observability]
+    enabled = true
+
+    [observability.logs]
+    enabled = true
 
     [vars]
     GITHUB_CLIENT_ID = "${var.github_client_id}"
