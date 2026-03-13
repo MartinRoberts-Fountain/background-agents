@@ -296,7 +296,7 @@ function SessionListItem({
   const displayTitle = session.title || `${session.repoOwner}/${session.repoName}`;
   const repoInfo = `${session.repoOwner}/${session.repoName}`;
   // Orphan child (parent filtered out) — show a subtle badge
-  const isOrphanChild = session.parentSessionId && session.spawn_source === "agent";
+  const isOrphanChild = session.parentSessionId && session.spawnSource === "agent";
   return (
     <Link
       href={buildSessionHref(session)}
