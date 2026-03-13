@@ -57,6 +57,32 @@ export function checkAccessAllowed(
   return false;
 }
 
+/**
+ * Fetch the user's primary verified email address from GitHub.
+ * Used as a fallback when the OAuth profile email is null (e.g. private email setting).
+ * Returns null if the request fails or no primary verified email is found.
+ */
+export async function fetchPrimaryVerifiedEmail(accessToken: string): Promise<string | null> {
+  try {
+    const res = await fetch("https://api.github.com/user/emails", {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${accessToken}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+    if (!res.ok) return null;
+    const emails = (await res.json()) as Array<{
+      email: string;
+      primary: boolean;
+      verified: boolean;
+    }>;
+    return emails.find((e) => e.primary && e.verified)?.email ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** GitHub API response shape for GET /user/memberships/orgs */
 interface GitHubOrgMembership {
   organization?: { login?: string };

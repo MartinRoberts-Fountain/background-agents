@@ -1,6 +1,11 @@
 import type { NextAuthOptions } from "next-auth";
 import GitHubProvider from "next-auth/providers/github";
-import { checkAccessAllowed, checkGitHubOrgMembership, parseAllowlist } from "./access-control";
+import {
+  checkAccessAllowed,
+  checkGitHubOrgMembership,
+  fetchPrimaryVerifiedEmail,
+  parseAllowlist,
+} from "./access-control";
 
 // Extend NextAuth types to include GitHub-specific user info
 declare module "next-auth" {
@@ -22,6 +27,7 @@ declare module "next-auth/jwt" {
     accessTokenExpiresAt?: number; // Unix timestamp in milliseconds
     githubUserId?: string;
     githubLogin?: string;
+    resolvedEmail?: string; // Primary verified email, including private addresses
   }
 }
 
@@ -53,10 +59,17 @@ export const authOptions: NextAuthOptions = {
         allowedUsers: parseAllowlist(process.env.ALLOWED_USERS),
       };
 
+      // user.email is null when the user's email is set to private on GitHub.
+      // Fall back to fetching the primary verified email via the API.
+      const email =
+        user.email ??
+        (account?.access_token ? await fetchPrimaryVerifiedEmail(account.access_token) : null) ??
+        undefined;
+
       const githubProfile = profile as { login?: string };
       const isAllowed = checkAccessAllowed(config, {
         githubUsername: githubProfile.login,
-        email: user.email ?? undefined,
+        email,
       });
 
       if (!isAllowed) {
@@ -70,6 +83,14 @@ export const authOptions: NextAuthOptions = {
         token.refreshToken = account.refresh_token as string | undefined;
         // expires_at is in seconds, convert to milliseconds (only set if provided)
         token.accessTokenExpiresAt = account.expires_at ? account.expires_at * 1000 : undefined;
+        // Persist the primary verified email so it survives future token refreshes.
+        // This also picks up private emails that aren't in the OAuth profile.
+        if (account.access_token) {
+          token.resolvedEmail =
+            (profile as { email?: string | null } | undefined)?.email ??
+            (await fetchPrimaryVerifiedEmail(account.access_token)) ??
+            undefined;
+        }
       }
       if (profile) {
         // GitHub profile includes id (numeric) and login (username)
@@ -87,6 +108,9 @@ export const authOptions: NextAuthOptions = {
       if (session.user) {
         session.user.id = token.githubUserId;
         session.user.login = token.githubLogin;
+        // Prefer the NextAuth-managed email but fall back to the resolved email
+        // (covers users with private email settings on GitHub)
+        session.user.email = session.user.email ?? token.resolvedEmail ?? null;
       }
       return session;
     },
