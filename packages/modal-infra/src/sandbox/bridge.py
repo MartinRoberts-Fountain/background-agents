@@ -599,8 +599,7 @@ class AgentBridge:
             return None
         try:
             config = json.loads(raw)
-            agent = config.get("agent")
-            return str(agent) if agent else None
+            return config.get("agent") or None
         except (json.JSONDecodeError, TypeError):
             return None
 
@@ -1616,7 +1615,7 @@ class AgentBridge:
                     timeout=self.GIT_CONFIG_TIMEOUT_SECONDS,
                 ) from e
 
-            if process.returncode is not None and process.returncode != 0:
+            if process.returncode != 0:
                 raise subprocess.CalledProcessError(
                     returncode=process.returncode,
                     cmd=cmd,

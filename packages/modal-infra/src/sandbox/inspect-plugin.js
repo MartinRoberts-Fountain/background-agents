@@ -64,8 +64,11 @@ export default tool({
 
     // Run pr-ready hook if present
     try {
-      console.log("[create-pull-request] Running 'npm run pr-ready --if-present'...")
-      await execFileAsync("npm", ["run", "pr-ready", "--if-present"], {
+      const isWxSystem = process.env.REPO_NAME === "wx-system"
+      const args = isWxSystem ? ["run", "pr-ready"] : ["run", "pr-ready", "--if-present"]
+
+      console.log(`[create-pull-request] Running 'npm ${args.join(" ")}'...`)
+      await execFileAsync("npm", args, {
         timeout: 60000, // 1 minute timeout
         cwd: process.cwd(),
       })
