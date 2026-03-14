@@ -61,6 +61,22 @@ export default tool({
   },
   async execute(args, context) {
     console.log(`[create-pull-request] execute() called with args:`, JSON.stringify(args))
+
+    // Run pr-ready hook if present
+    try {
+      const isWxSystem = process.env.REPO_NAME === "wx-system"
+      const args = isWxSystem ? ["run", "pr-ready"] : ["run", "pr-ready", "--if-present"]
+
+      console.log(`[create-pull-request] Running 'npm ${args.join(" ")}'...`)
+      await execFileAsync("npm", args, {
+        timeout: 60000, // 1 minute timeout
+        cwd: process.cwd(),
+      })
+    } catch (e) {
+      console.log("[create-pull-request] pr-ready hook failed:", e.message)
+      return `Pull request creation aborted: 'npm run pr-ready' failed.\n\n${e.stdout || ""}\n${e.stderr || ""}\n${e.message}`
+    }
+
     const title = args.title || "Changes from OpenCode session"
     const body = args.body || "Automated PR created via create-pull-request tool"
     const baseBranch = args.baseBranch // undefined if not provided, server will use default
