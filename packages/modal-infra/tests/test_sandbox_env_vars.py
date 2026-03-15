@@ -333,16 +333,17 @@ async def test_vcs_env_vars_default_github(monkeypatch):
     config = SandboxConfig(
         repo_owner="acme",
         repo_name="repo",
-        clone_token="ghp_test123",
+        clone_token="dummy_token_test123",
     )
     await manager.create_sandbox(config)
 
     env = captured["env"]
     assert env["VCS_HOST"] == "github.com"
     assert env["VCS_CLONE_USERNAME"] == "x-access-token"
-    assert env["VCS_CLONE_TOKEN"] == "ghp_test123"
-    assert env["GITHUB_APP_TOKEN"] == "ghp_test123"
-    assert env["GITHUB_TOKEN"] == "ghp_test123"
+    assert env["VCS_CLONE_TOKEN"] == "dummy_token_test123"
+    assert env["GITHUB_APP_TOKEN"] == "dummy_token_test123"
+    assert env["GITHUB_TOKEN"] == "dummy_token_test123"
+    assert env["GH_TOKEN"] == "dummy_token_test123"
 
 
 @pytest.mark.asyncio
@@ -356,14 +357,14 @@ async def test_vcs_env_vars_explicit_github(monkeypatch):
     config = SandboxConfig(
         repo_owner="acme",
         repo_name="repo",
-        clone_token="ghp_test123",
+        clone_token="dummy_token_test123",
     )
     await manager.create_sandbox(config)
 
     env = captured["env"]
     assert env["VCS_HOST"] == "github.com"
     assert env["VCS_CLONE_USERNAME"] == "x-access-token"
-    assert env["VCS_CLONE_TOKEN"] == "ghp_test123"
+    assert env["VCS_CLONE_TOKEN"] == "dummy_token_test123"
 
 
 @pytest.mark.asyncio
@@ -377,17 +378,18 @@ async def test_vcs_env_vars_bitbucket(monkeypatch):
     config = SandboxConfig(
         repo_owner="acme",
         repo_name="repo",
-        clone_token="bb_token_abc",
+        clone_token="dummy_bb_token_abc",
     )
     await manager.create_sandbox(config)
 
     env = captured["env"]
     assert env["VCS_HOST"] == "bitbucket.org"
     assert env["VCS_CLONE_USERNAME"] == "x-token-auth"
-    assert env["VCS_CLONE_TOKEN"] == "bb_token_abc"
+    assert env["VCS_CLONE_TOKEN"] == "dummy_bb_token_abc"
     # GitHub-specific vars not set for Bitbucket
     assert "GITHUB_APP_TOKEN" not in env
     assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env
 
 
 @pytest.mark.asyncio
@@ -410,6 +412,7 @@ async def test_vcs_env_vars_no_token(monkeypatch):
     assert "VCS_CLONE_TOKEN" not in env
     assert "GITHUB_APP_TOKEN" not in env
     assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env
 
 
 @pytest.mark.asyncio
@@ -434,13 +437,14 @@ async def test_restore_vcs_env_vars(monkeypatch):
             "model": "claude-sonnet-4-6",
             "session_id": "sess-1",
         },
-        clone_token="bb_token_xyz",
+        clone_token="dummy_bb_token_xyz",
     )
 
     env = captured["env"]
     assert env["VCS_HOST"] == "bitbucket.org"
     assert env["VCS_CLONE_USERNAME"] == "x-token-auth"
-    assert env["VCS_CLONE_TOKEN"] == "bb_token_xyz"
+    assert env["VCS_CLONE_TOKEN"] == "dummy_bb_token_xyz"
     # GitHub-specific vars not set for Bitbucket
     assert "GITHUB_APP_TOKEN" not in env
     assert "GITHUB_TOKEN" not in env
+    assert "GH_TOKEN" not in env

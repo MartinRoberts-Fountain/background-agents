@@ -635,6 +635,7 @@ export class SessionDO extends DurableObject<Env> {
     const config = {
       ...DEFAULT_LIFECYCLE_CONFIG,
       controlPlaneUrl,
+      scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
       model: DEFAULT_MODEL,
       sessionId,
       inactivity: {
