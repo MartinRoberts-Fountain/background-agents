@@ -25,8 +25,9 @@ permission:
     "rg *": allow
     # Git inspection only (for file gate self-check)
     "git diff --name-only*": allow
-    # Deny dangerous commands under uv run
-    "uv *": deny
+    "uv run dbt *": allow
+    "uv run dagster *": allow
+
     # Explicit top-level denials
     "git *": deny
     "pip *": deny

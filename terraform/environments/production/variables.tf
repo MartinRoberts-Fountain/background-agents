@@ -378,3 +378,9 @@ variable "allowed_github_orgs" {
   type        = string
   default     = ""
 }
+
+variable "signoz_api_key" {
+  description = "Signoz API key for pulling data"
+  type        = string
+  sensitive   = true
+}

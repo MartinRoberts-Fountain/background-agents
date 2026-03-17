@@ -83,6 +83,7 @@ module "control_plane_worker" {
       { name = "HELM_API_SECRET", value = var.helm_api_secret },
       { name = "CLOUDFLARE_TUNNEL_TOKEN", value = var.cloudflare_tunnel_token },
       { name = "EC2_API_SECRET", value = var.ec2_api_secret },
+      { name = "SIGNOZ_API_KEY", value = var.signoz_api_key },
     ]
   )
 

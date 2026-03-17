@@ -403,26 +403,37 @@ class AgentBridge:
                 )
 
     async def _send_event(self, event: dict[str, Any]) -> None:
-        """Send event to control plane, buffering if WS is unavailable."""
-        event_type = event.get("type", "unknown")
-        event["sandboxId"] = self.sandbox_id
-        event["timestamp"] = event.get("timestamp", time.time())
+        """Send event to control plane, buffering if WS is unavailable.
 
-        is_critical = event_type in self.CRITICAL_EVENT_TYPES
-        if is_critical and "ackId" not in event:
-            event["ackId"] = self._make_ack_id(event)
-
-        if not self.ws or self.ws.state != State.OPEN:
-            self._buffer_event(event)
-            return
-
+        Never raises: logs and optionally buffers on failure so one bad event
+        (e.g. non-JSON-serializable payload) does not stop the bridge.
+        """
         try:
-            await self.ws.send(json.dumps(event))
+            event_type = event.get("type", "unknown")
+            event["sandboxId"] = self.sandbox_id
+            event["timestamp"] = event.get("timestamp", time.time())
+
+            is_critical = event_type in self.CRITICAL_EVENT_TYPES
+            if is_critical and "ackId" not in event:
+                event["ackId"] = self._make_ack_id(event)
+
+            if not self.ws or self.ws.state != State.OPEN:
+                self._buffer_event(event)
+                return
+
+            payload = json.dumps(event)
+            await self.ws.send(payload)
             if is_critical:
                 self._pending_acks[event["ackId"]] = event
         except Exception as e:
-            self.log.warn("bridge.send_error", event_type=event_type, exc=e)
-            self._buffer_event(event)
+            with contextlib.suppress(Exception):
+                self.log.warn(
+                    "bridge.send_error",
+                    event_type=event.get("type", "unknown"),
+                    exc=e,
+                )
+            with contextlib.suppress(Exception):
+                self._buffer_event(event)
 
     async def _flush_event_buffer(self) -> set[str]:
         """Flush buffered events to the control plane after reconnect.
@@ -543,30 +554,39 @@ class AgentBridge:
             self._current_prompt_task = task
 
             def handle_task_exception(t: asyncio.Task[None], mid: str = message_id) -> None:
-                if self._current_prompt_task is t:
-                    self._current_prompt_task = None
-                if t.cancelled():
-                    asyncio.create_task(
-                        self._send_event(
-                            {
-                                "type": "execution_complete",
-                                "messageId": mid,
-                                "success": False,
-                                "error": "Task was cancelled",
-                            }
+                """Done callback for prompt task. Must never raise."""
+                try:
+                    if self._current_prompt_task is t:
+                        self._current_prompt_task = None
+                    if t.cancelled():
+                        asyncio.create_task(
+                            self._send_event(
+                                {
+                                    "type": "execution_complete",
+                                    "messageId": mid,
+                                    "success": False,
+                                    "error": "Task was cancelled",
+                                }
+                            )
                         )
-                    )
-                elif exc := t.exception():
-                    asyncio.create_task(
-                        self._send_event(
-                            {
-                                "type": "execution_complete",
-                                "messageId": mid,
-                                "success": False,
-                                "error": str(exc),
-                            }
+                    elif exc := t.exception():
+                        asyncio.create_task(
+                            self._send_event(
+                                {
+                                    "type": "execution_complete",
+                                    "messageId": mid,
+                                    "success": False,
+                                    "error": str(exc),
+                                }
+                            )
                         )
-                    )
+                except Exception as e:
+                    with contextlib.suppress(Exception):
+                        self.log.error(
+                            "bridge.task_callback_error",
+                            message_id=mid,
+                            exc=e,
+                        )
 
             task.add_done_callback(handle_task_exception)
             # Don't return the task — prompt tasks must survive WS disconnects.
@@ -712,60 +732,91 @@ class AgentBridge:
             return error.get("message") or error.get("name")
         return str(error) if error else None
 
+    @staticmethod
+    def _safe_json_value(value: Any) -> Any:
+        """Return a JSON-serializable copy of value for event payloads and logging.
+
+        Prevents control-plane disconnect when OpenCode sends non-serializable
+        data (e.g. in tool input/output) that would break json.dumps or logging.
+        """
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, dict):
+            return {str(k): AgentBridge._safe_json_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [AgentBridge._safe_json_value(v) for v in value]
+        return str(value)
+
     def _transform_part_to_event(
         self,
         part: dict[str, Any],
         message_id: str,
     ) -> dict[str, Any] | None:
-        """Transform a single OpenCode part to a bridge event."""
-        part_type = part.get("type")
+        """Transform a single OpenCode part to a bridge event.
 
-        if part_type == "text":
-            text = part.get("text", "")
-            if text:
+        Never raises: logs and returns None on any error so one bad part
+        (e.g. bash tool with unexpected structure) does not stop the bridge.
+        """
+        try:
+            part_type = part.get("type")
+
+            if part_type == "text":
+                text = part.get("text", "")
+                if text:
+                    return {
+                        "type": "token",
+                        "content": text,
+                        "messageId": message_id,
+                    }
+            elif part_type == "tool":
+                state = part.get("state", {}) if isinstance(part.get("state"), dict) else {}
+                status = str(state.get("status", ""))
+                tool_input = state.get("input", {})
+                tool_name = part.get("tool", "")
+                tool_name_safe = str(tool_name) if tool_name is not None else ""
+
+                with contextlib.suppress(Exception):
+                    self.log.debug(
+                        "bridge.tool_part",
+                        tool=tool_name_safe,
+                        status=status,
+                    )
+
+                if status in ("pending", "") and not tool_input:
+                    return None
+
                 return {
-                    "type": "token",
-                    "content": text,
+                    "type": "tool_call",
+                    "tool": tool_name_safe,
+                    "args": self._safe_json_value(tool_input),
+                    "callId": str(part.get("callID", "")),
+                    "status": status,
+                    "output": self._safe_json_value(state.get("output", "")),
                     "messageId": message_id,
                 }
-        elif part_type == "tool":
-            state = part.get("state", {})
-            status = state.get("status", "")
-            tool_input = state.get("input", {})
+            elif part_type == "step-finish":
+                return {
+                    "type": "step_finish",
+                    "cost": part.get("cost"),
+                    "tokens": part.get("tokens"),
+                    "reason": part.get("reason"),
+                    "messageId": message_id,
+                }
+            elif part_type == "step-start":
+                return {
+                    "type": "step_start",
+                    "messageId": message_id,
+                }
 
-            self.log.debug(
-                "bridge.tool_part",
-                tool=part.get("tool"),
-                status=status,
-            )
-
-            if status in ("pending", "") and not tool_input:
-                return None
-
-            return {
-                "type": "tool_call",
-                "tool": part.get("tool", ""),
-                "args": tool_input,
-                "callId": part.get("callID", ""),
-                "status": status,
-                "output": state.get("output", ""),
-                "messageId": message_id,
-            }
-        elif part_type == "step-finish":
-            return {
-                "type": "step_finish",
-                "cost": part.get("cost"),
-                "tokens": part.get("tokens"),
-                "reason": part.get("reason"),
-                "messageId": message_id,
-            }
-        elif part_type == "step-start":
-            return {
-                "type": "step_start",
-                "messageId": message_id,
-            }
-
-        return None
+            return None
+        except Exception as e:
+            with contextlib.suppress(Exception):
+                self.log.warn(
+                    "bridge.transform_part_error",
+                    part_type=str(part.get("type", "unknown")),
+                    exc=e,
+                )
+            return None
 
     # Anthropic extended thinking budget tokens by reasoning effort level.
     # "max" uses 31,999 — the API maximum for streaming responses.
@@ -958,64 +1009,74 @@ class AgentBridge:
             *,
             is_subtask: bool = False,
         ) -> list[dict[str, Any]]:
-            part_type = part.get("type", "")
-            part_id = part.get("id", "")
-            events: list[dict[str, Any]] = []
+            """Process one part into bridge events. Never raises; returns [] on error."""
+            try:
+                part_type = part.get("type", "")
+                part_id = part.get("id", "")
+                events: list[dict[str, Any]] = []
 
-            if part_type == "text":
-                if is_subtask:
-                    return events  # Don't forward child text tokens
-                text = part.get("text", "")
-                if delta:
-                    cumulative_text[part_id] = cumulative_text.get(part_id, "") + delta
-                else:
-                    cumulative_text[part_id] = text
+                if part_type == "text":
+                    if is_subtask:
+                        return events  # Don't forward child text tokens
+                    text = part.get("text", "")
+                    if delta:
+                        cumulative_text[part_id] = cumulative_text.get(part_id, "") + delta
+                    else:
+                        cumulative_text[part_id] = text
 
-                if cumulative_text.get(part_id):
+                    if cumulative_text.get(part_id):
+                        events.append(
+                            {
+                                "type": "token",
+                                "content": cumulative_text[part_id],
+                                "messageId": message_id,
+                            }
+                        )
+
+                elif part_type == "tool":
+                    tool_event = self._transform_part_to_event(part, message_id)
+                    if tool_event:
+                        state = part.get("state", {}) or {}
+                        status = state.get("status", "")
+                        call_id = part.get("callID", "")
+                        part_sid = part.get("sessionID", "")
+                        tool_key = f"tool:{part_sid}:{call_id}:{status}"
+
+                        if tool_key not in emitted_tool_states:
+                            emitted_tool_states.add(tool_key)
+                            events.append(tool_event)
+
+                elif part_type == "step-start":
                     events.append(
                         {
-                            "type": "token",
-                            "content": cumulative_text[part_id],
+                            "type": "step_start",
                             "messageId": message_id,
                         }
                     )
 
-            elif part_type == "tool":
-                tool_event = self._transform_part_to_event(part, message_id)
-                if tool_event:
-                    state = part.get("state", {})
-                    status = state.get("status", "")
-                    call_id = part.get("callID", "")
-                    part_sid = part.get("sessionID", "")
-                    tool_key = f"tool:{part_sid}:{call_id}:{status}"
+                elif part_type == "step-finish":
+                    events.append(
+                        {
+                            "type": "step_finish",
+                            "cost": part.get("cost"),
+                            "tokens": part.get("tokens"),
+                            "reason": part.get("reason"),
+                            "messageId": message_id,
+                        }
+                    )
 
-                    if tool_key not in emitted_tool_states:
-                        emitted_tool_states.add(tool_key)
-                        events.append(tool_event)
-
-            elif part_type == "step-start":
-                events.append(
-                    {
-                        "type": "step_start",
-                        "messageId": message_id,
-                    }
-                )
-
-            elif part_type == "step-finish":
-                events.append(
-                    {
-                        "type": "step_finish",
-                        "cost": part.get("cost"),
-                        "tokens": part.get("tokens"),
-                        "reason": part.get("reason"),
-                        "messageId": message_id,
-                    }
-                )
-
-            if is_subtask:
-                for ev in events:
-                    ev["isSubtask"] = True
-            return events
+                if is_subtask:
+                    for ev in events:
+                        ev["isSubtask"] = True
+                return events
+            except Exception as e:
+                with contextlib.suppress(Exception):
+                    self.log.warn(
+                        "bridge.handle_part_error",
+                        part_type=str(part.get("type", "unknown")),
+                        exc=e,
+                    )
+                return []
 
         try:
             deadline = asyncio.get_running_loop().time() + self.sse_inactivity_timeout

@@ -36,6 +36,8 @@ export interface HelmApiConfig {
   tunnelToken: string;
   /** Source control provider, used to align VCS clone defaults with Modal behavior. */
   scmProvider?: "github" | "bitbucket";
+  /** Signoz API key for sandbox telemetry (injected into sandbox env). */
+  signozApiKey?: string;
 }
 
 export interface HelmDeployRequest {
@@ -205,6 +207,11 @@ export class HelmSandboxProvider implements SandboxProvider {
         .replace(/[^a-z0-9-]/g, "-")
         .slice(0, 53);
 
+      const signozApiKey = this.client["config"].signozApiKey;
+      const userEnvVars = {
+        ...config.userEnvVars,
+        ...(signozApiKey != null && signozApiKey !== "" && { SIGNOZ_API_KEY: signozApiKey }),
+      };
       const result = await this.client.deploy({
         releaseName,
         sandboxId: config.sandboxId,
@@ -217,7 +224,7 @@ export class HelmSandboxProvider implements SandboxProvider {
         model: config.model,
         branch: config.branch,
         agent: config.agent,
-        userEnvVars: config.userEnvVars,
+        userEnvVars,
         timeoutSeconds: config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
         tunnelToken: this.client["config"].tunnelToken,
         namespace: this.client["config"].namespace,

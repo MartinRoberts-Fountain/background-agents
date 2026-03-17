@@ -27,6 +27,8 @@ export interface EC2ApiConfig {
   apiUrl: string;
   /** Shared secret for authenticating requests */
   apiSecret: string;
+  /** Signoz API key for sandbox telemetry (injected into sandbox env). */
+  signozApiKey?: string;
 }
 
 export interface EC2DeployRequest {
@@ -160,7 +162,13 @@ export class EC2SandboxProvider implements SandboxProvider {
         model: config.model,
         branch: config.branch,
         agent: config.agent,
-        userEnvVars: config.userEnvVars,
+        userEnvVars: {
+          ...config.userEnvVars,
+          ...(this.client["config"].signozApiKey != null &&
+            this.client["config"].signozApiKey !== "" && {
+              SIGNOZ_API_KEY: this.client["config"].signozApiKey,
+            }),
+        },
         timeoutSeconds: config.timeoutSeconds ?? DEFAULT_SANDBOX_TIMEOUT_SECONDS,
       });
 

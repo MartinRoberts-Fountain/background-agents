@@ -46,7 +46,7 @@ class SandboxSupervisor:
     SETUP_SCRIPT_PATH = ".openinspect/setup.sh"
     START_SCRIPT_PATH = ".openinspect/start.sh"
     DEFAULT_SETUP_TIMEOUT_SECONDS = 300
-    DEFAULT_START_TIMEOUT_SECONDS = 120
+    DEFAULT_START_TIMEOUT_SECONDS = 300
     CLONE_DEPTH_COMMITS = 100
     PROXY_SCRIPT_PATH = "/app/sandbox/proxy.mjs"
 

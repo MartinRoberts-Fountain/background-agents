@@ -541,6 +541,7 @@ export class SessionDO extends DurableObject<Env> {
         namespace: this.env.HELM_NAMESPACE || "open-inspect",
         tunnelToken: this.env.CLOUDFLARE_TUNNEL_TOKEN || "",
         scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
+        signozApiKey: this.env.SIGNOZ_API_KEY,
       });
     } else if (sandboxProvider === "ec2") {
       // EC2 provider
@@ -550,6 +551,7 @@ export class SessionDO extends DurableObject<Env> {
       provider = createEC2Provider({
         apiUrl: this.env.EC2_API_URL,
         apiSecret: this.env.EC2_API_SECRET,
+        signozApiKey: this.env.SIGNOZ_API_KEY,
       });
     } else {
       // Modal provider (default), or fallback when EC2/Helm requested but not configured
