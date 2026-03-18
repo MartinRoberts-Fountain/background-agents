@@ -53,14 +53,25 @@ resource "null_resource" "web_app_cloudflare_secrets" {
 
 # Generate a production wrangler config with the correct service binding name.
 # This avoids mutating the checked-in wrangler.toml (which defaults to local dev).
-resource "local_file" "web_app_wrangler_production" {
+resource "local_file" "web_app_wrangler_staging" {
   count    = var.web_platform == "cloudflare" ? 1 : 0
-  filename = "${var.project_root}/packages/web/wrangler.production.toml"
+  filename = "${var.project_root}/packages/web/wrangler.staging.toml"
   content  = <<-TOML
     name = "open-inspect-web-${local.name_suffix}"
     main = ".open-next/worker.js"
     compatibility_date = "2025-08-15"
     compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+    workers_dev = false
+
+    [[routes]]
+    pattern = "coding-agent-staging.internal.fountain.com"
+    custom_domain = true
+
+    [observability]
+    enabled = true
+
+    [observability.logs]
+    enabled = true
 
     [vars]
     GITHUB_CLIENT_ID = "${var.github_client_id}"
@@ -90,7 +101,7 @@ resource "null_resource" "web_app_cloudflare_deploy" {
   }
 
   provisioner "local-exec" {
-    command     = "npx wrangler deploy --config wrangler.production.toml"
+    command     = "npx wrangler deploy --config wrangler.staging.toml"
     working_dir = "${var.project_root}/packages/web"
 
     environment = {
@@ -102,6 +113,6 @@ resource "null_resource" "web_app_cloudflare_deploy" {
   depends_on = [
     null_resource.web_app_cloudflare_build,
     module.control_plane_worker,
-    local_file.web_app_wrangler_production,
+    local_file.web_app_wrangler_staging,
   ]
 }

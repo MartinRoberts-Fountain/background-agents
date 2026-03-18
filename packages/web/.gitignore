@@ -3,4 +3,5 @@
 .open-next
 .dev.vars
 wrangler.production.toml
+wrangler.staging.toml
 next-env.d.ts
