@@ -163,18 +163,18 @@ export default function Home() {
   }, [hasHydratedModelPreferences, selectedModel, reasoningEffort]);
 
   useEffect(() => {
-    if (!hasHydratedModelPreferences.current) return;
+    if (!hasHydratedModelPreferences) return;
     if (selectedProvider) {
       localStorage.setItem(LAST_SELECTED_PROVIDER_STORAGE_KEY, selectedProvider);
     } else {
       localStorage.removeItem(LAST_SELECTED_PROVIDER_STORAGE_KEY);
     }
-  }, [selectedProvider]);
+  }, [hasHydratedModelPreferences, selectedProvider]);
 
   useEffect(() => {
-    if (!hasHydratedModelPreferences.current) return;
+    if (!hasHydratedModelPreferences) return;
     localStorage.setItem(LAST_SELECTED_MODE_STORAGE_KEY, selectedMode);
-  }, [selectedMode]);
+  }, [hasHydratedModelPreferences, selectedMode]);
 
   useEffect(() => {
     if (defaultAgentData && selectedRepoOwner && selectedRepoName) {

@@ -218,6 +218,9 @@ describe("POST /internal/init — mode and sandboxProvider persistence", () => {
 
     expect(rows[0].mode).toBeNull();
     expect(rows[0].sandbox_provider).toBe("ec2");
+  });
+});
+
 describe("POST /internal/update-title", () => {
   it("updates the session title", async () => {
     const { stub } = await initSession({ userId: "user-1" });
