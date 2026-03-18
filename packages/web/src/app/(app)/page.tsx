@@ -8,6 +8,7 @@ import Link from "next/link";
 import { useSidebarContext } from "@/components/sidebar-layout";
 import { formatModelNameLower } from "@/lib/format";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
+import { SIDEBAR_SESSIONS_KEY } from "@/lib/session-list";
 import {
   DEFAULT_MODEL,
   getDefaultReasoningEffort,
@@ -80,7 +81,7 @@ export default function Home() {
   const sessionCreationPromise = useRef<Promise<string | null> | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const pendingConfigRef = useRef<{ repo: string; model: string; branch: string } | null>(null);
-  const hasHydratedModelPreferences = useRef(false);
+  const [hasHydratedModelPreferences, setHasHydratedModelPreferences] = useState(false);
   const { enabledModels, enabledModelOptions } = useEnabledModels();
   const selectedRepoOwner = selectedRepo.split("/")[0] ?? "";
   const selectedRepoName = selectedRepo.split("/")[1] ?? "";
@@ -119,7 +120,7 @@ export default function Home() {
   }, [selectedRepo]);
 
   useEffect(() => {
-    if (enabledModels.length === 0 || hasHydratedModelPreferences.current) return;
+    if (enabledModels.length === 0 || hasHydratedModelPreferences) return;
 
     const storedModel = localStorage.getItem(LAST_SELECTED_MODEL_STORAGE_KEY);
     const selectedModelFromStorage =
@@ -146,11 +147,11 @@ export default function Home() {
 
     setSelectedModel(selectedModelFromStorage);
     setReasoningEffort(reasoningEffortFromStorage);
-    hasHydratedModelPreferences.current = true;
-  }, [enabledModels]);
+    setHasHydratedModelPreferences(true);
+  }, [enabledModels, hasHydratedModelPreferences]);
 
   useEffect(() => {
-    if (!hasHydratedModelPreferences.current) return;
+    if (!hasHydratedModelPreferences) return;
     localStorage.setItem(LAST_SELECTED_MODEL_STORAGE_KEY, selectedModel);
 
     if (reasoningEffort) {
@@ -159,7 +160,7 @@ export default function Home() {
     }
 
     localStorage.removeItem(LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY);
-  }, [selectedModel, reasoningEffort]);
+  }, [hasHydratedModelPreferences, selectedModel, reasoningEffort]);
 
   useEffect(() => {
     if (!hasHydratedModelPreferences.current) return;
@@ -268,8 +269,10 @@ export default function Home() {
     pendingSessionId,
   ]);
 
-  // Reset selections when model preferences change
+  // Reset selections when model preferences change (only after hydration)
   useEffect(() => {
+    if (!hasHydratedModelPreferences) return;
+
     if (enabledModels.length > 0 && !enabledModels.includes(selectedModel)) {
       const fallback = enabledModels[0] ?? DEFAULT_MODEL;
       setSelectedModel(fallback);
@@ -280,7 +283,7 @@ export default function Home() {
     if (reasoningEffort && !isValidReasoningEffort(selectedModel, reasoningEffort)) {
       setReasoningEffort(getDefaultReasoningEffort(selectedModel));
     }
-  }, [enabledModels, selectedModel, reasoningEffort]);
+  }, [hasHydratedModelPreferences, enabledModels, selectedModel, reasoningEffort]);
 
   const handleRepoChange = useCallback(
     (repoFullName: string) => {
@@ -338,7 +341,7 @@ export default function Home() {
       });
 
       if (res.ok) {
-        mutate("/api/sessions");
+        mutate(SIDEBAR_SESSIONS_KEY);
         router.push(`/session/${sessionId}`);
       } else {
         const data = await res.json();

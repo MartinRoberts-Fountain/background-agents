@@ -21,6 +21,7 @@ from pathlib import Path
 
 import httpx
 
+from .constants import CODE_SERVER_PORT
 from .log_config import configure_logging, get_logger
 
 configure_logging()
@@ -46,14 +47,13 @@ class SandboxSupervisor:
     SETUP_SCRIPT_PATH = ".openinspect/setup.sh"
     START_SCRIPT_PATH = ".openinspect/start.sh"
     DEFAULT_SETUP_TIMEOUT_SECONDS = 300
-    DEFAULT_START_TIMEOUT_SECONDS = 300
+    DEFAULT_START_TIMEOUT_SECONDS = 120
     CLONE_DEPTH_COMMITS = 100
-    PROXY_SCRIPT_PATH = "/app/sandbox/proxy.mjs"
 
     def __init__(self):
         self.opencode_process: asyncio.subprocess.Process | None = None
         self.bridge_process: asyncio.subprocess.Process | None = None
-        self.proxy_process: asyncio.subprocess.Process | None = None
+        self.code_server_process: asyncio.subprocess.Process | None = None
         self.shutdown_event = asyncio.Event()
         self.git_sync_complete = asyncio.Event()
         self.opencode_ready = asyncio.Event()
@@ -113,12 +113,11 @@ class SandboxSupervisor:
             authenticated=bool(self.vcs_clone_token),
         )
 
-        clone_depth = self.CLONE_DEPTH_COMMITS if self.boot_mode == "build" else 1
         result = await asyncio.create_subprocess_exec(
             "git",
             "clone",
             "--depth",
-            str(clone_depth),
+            str(self.CLONE_DEPTH_COMMITS),
             "--branch",
             self.base_branch,
             self._build_repo_url(),
@@ -212,8 +211,8 @@ class SandboxSupervisor:
     async def _update_existing_repo(self) -> bool:
         """Fetch the target branch and check it out in an existing repo.
 
-        Used by the repo-image and fresh boot paths where the working tree is
-        clean (no in-progress agent changes).
+        Used by both snapshot-restore and repo-image boot paths where the
+        repository already exists on disk.
         """
         if not self.repo_path.exists():
             self.log.info("git.update_skip", reason="no_repo_path")
@@ -227,102 +226,6 @@ class SandboxSupervisor:
             return await self._checkout_branch(branch)
         except Exception as e:
             self.log.error("git.update_error", exc=e)
-            return False
-
-    async def _fetch_and_reset_to_latest(self) -> bool:
-        """Fetch the latest from origin and reset to it, preserving uncommitted changes.
-
-        Designed for snapshot-restore boots where the working tree may contain
-        in-progress changes from a prior agent session.
-
-        Strategy:
-        1. Fetch the latest remote state.
-        2. Stash uncommitted changes (including untracked files).
-        3. Hard-reset the branch to ``origin/<branch>`` so the working tree is
-           always on the latest commit from origin.
-        4. Re-apply the stash so the agent's in-progress work survives.
-
-        Returns:
-            True if the working tree is now at the latest origin tip, False if
-            the fetch or reset failed (stash-pop conflicts are non-fatal).
-        """
-        if not self.repo_path.exists():
-            self.log.info("git.fetch_reset_skip", reason="no_repo_path")
-            return False
-
-        try:
-            await self._ensure_remote_auth()
-            branch = self.base_branch
-
-            if not await self._fetch_branch(branch):
-                return False
-
-            # Stash uncommitted changes so the hard reset can always proceed.
-            stash_proc = await asyncio.create_subprocess_exec(
-                "git",
-                "stash",
-                "--include-untracked",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stash_stdout, _ = await stash_proc.communicate()
-            did_stash = (
-                stash_proc.returncode == 0 and b"No local changes to save" not in stash_stdout
-            )
-
-            # Hard-reset to the latest remote tip — always succeeds on a clean tree.
-            reset_proc = await asyncio.create_subprocess_exec(
-                "git",
-                "reset",
-                "--hard",
-                f"origin/{branch}",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, reset_stderr = await reset_proc.communicate()
-            if reset_proc.returncode != 0:
-                self.log.error(
-                    "git.reset_hard_failed",
-                    branch=branch,
-                    stderr=reset_stderr.decode(),
-                )
-                if did_stash:
-                    # Restore stash so agent work is not lost on failure.
-                    await asyncio.create_subprocess_exec(
-                        "git",
-                        "stash",
-                        "pop",
-                        cwd=self.repo_path,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                return False
-
-            # Re-apply the agent's in-progress changes on top of the latest code.
-            if did_stash:
-                pop_proc = await asyncio.create_subprocess_exec(
-                    "git",
-                    "stash",
-                    "pop",
-                    cwd=self.repo_path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                _, pop_stderr = await pop_proc.communicate()
-                if pop_proc.returncode != 0:
-                    self.log.warn(
-                        "git.stash_pop_conflict",
-                        branch=branch,
-                        stderr=pop_stderr.decode(),
-                    )
-                    # Conflict markers are left in the working tree; non-fatal.
-
-            self.log.info("git.fetch_reset_complete", branch=branch, did_stash=did_stash)
-            return True
-        except Exception as e:
-            self.log.error("git.fetch_reset_error", exc=e)
             return False
 
     async def perform_git_sync(self) -> bool:
@@ -424,6 +327,46 @@ class SandboxSupervisor:
         except Exception as e:
             self.log.warn("openai_oauth.setup_error", exc=e)
 
+    async def start_code_server(self) -> None:
+        """Start code-server for browser-based VS Code editing."""
+        password = os.environ.get("CODE_SERVER_PASSWORD")
+        if not password:
+            self.log.info("code_server.skip", reason="no_password")
+            return
+
+        # Use repo path if cloned, otherwise /workspace
+        workdir = self.workspace_path
+        if self.repo_path.exists() and (self.repo_path / ".git").exists():
+            workdir = self.repo_path
+
+        self.code_server_process = await asyncio.create_subprocess_exec(
+            "code-server",
+            "--bind-addr",
+            f"0.0.0.0:{CODE_SERVER_PORT}",
+            "--auth",
+            "password",
+            "--disable-telemetry",
+            str(workdir),
+            cwd=workdir,
+            env={**os.environ, "PASSWORD": password},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+
+        asyncio.create_task(self._forward_code_server_logs())
+        self.log.info("code_server.started", port=CODE_SERVER_PORT)
+
+    async def _forward_code_server_logs(self) -> None:
+        """Forward code-server stdout to supervisor stdout."""
+        if not self.code_server_process or not self.code_server_process.stdout:
+            return
+
+        try:
+            async for line in self.code_server_process.stdout:
+                self.log.info("code_server.stdout", line=line.decode().rstrip())
+        except Exception as e:
+            self.log.warn("code_server.log_forward_error", exc=e)
+
     async def start_opencode(self) -> None:
         """Start OpenCode server with configuration."""
         self._setup_openai_oauth()
@@ -442,10 +385,6 @@ class SandboxSupervisor:
             },
         }
 
-        # Set default agent from session config if provided
-        agent = self.session_config.get("agent")
-        if agent:
-            opencode_config["default_agent"] = agent
         # Determine working directory - use repo path if cloned, otherwise /workspace
         workdir = self.workspace_path
         if self.repo_path.exists() and (self.repo_path / ".git").exists():
@@ -598,49 +537,13 @@ class SandboxSupervisor:
         except Exception as e:
             print(f"[supervisor] Bridge log forwarding error: {e}")
 
-    async def start_proxy(self) -> None:
-        """Start the proxy process."""
-        proxy_path = Path(self.PROXY_SCRIPT_PATH)
-        if not proxy_path.exists():
-            self.log.info("proxy.skip", reason="no_proxy_script")
-            return
-
-        self.proxy_process = await asyncio.create_subprocess_exec(
-            "node",
-            str(proxy_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        self.log.info("proxy.started")
-
     async def monitor_processes(self) -> None:
         """Monitor child processes and restart on crash."""
         restart_count = 0
         bridge_restart_count = 0
-        proxy_restart_count = 0
+        code_server_restart_count = 0
 
         while not self.shutdown_event.is_set():
-            # Check proxy process
-            if self.proxy_process and self.proxy_process.returncode is not None:
-                exit_code = self.proxy_process.returncode
-                proxy_restart_count += 1
-
-                self.log.error(
-                    "proxy.crash", exit_code=exit_code, restart_count=proxy_restart_count
-                )
-
-                if proxy_restart_count > self.MAX_RESTARTS:
-                    self.log.error("proxy.max_restarts", restart_count=proxy_restart_count)
-                    await self._report_fatal_error(
-                        f"Proxy crashed {proxy_restart_count} times, giving up"
-                    )
-                    self.shutdown_event.set()
-                    break
-
-                delay = min(self.BACKOFF_BASE**proxy_restart_count, self.BACKOFF_MAX)
-                await asyncio.sleep(delay)
-                await self.start_proxy()
-
             # Check OpenCode process
             if self.opencode_process and self.opencode_process.returncode is not None:
                 exit_code = self.opencode_process.returncode
@@ -716,6 +619,29 @@ class SandboxSupervisor:
                     )
                     await asyncio.sleep(delay)
                     await self.start_bridge()
+
+            # Check code-server process (non-fatal, best-effort restart)
+            if self.code_server_process and self.code_server_process.returncode is not None:
+                code_server_restart_count += 1
+                self.log.warn(
+                    "code_server.crash",
+                    exit_code=self.code_server_process.returncode,
+                    restart_count=code_server_restart_count,
+                )
+
+                if code_server_restart_count <= self.MAX_RESTARTS:
+                    delay = min(self.BACKOFF_BASE**code_server_restart_count, self.BACKOFF_MAX)
+                    await asyncio.sleep(delay)
+                    try:
+                        await self.start_code_server()
+                    except Exception as e:
+                        self.log.warn("code_server.restart_failed", exc=e)
+                        self.code_server_process = None
+                else:
+                    self.log.warn(
+                        "code_server.max_restarts", restart_count=code_server_restart_count
+                    )
+                    self.code_server_process = None
 
             await asyncio.sleep(1.0)
 
@@ -922,13 +848,8 @@ class SandboxSupervisor:
         try:
             # Phase 1: Git sync
             if restored_from_snapshot:
-                git_sync_success = await self._fetch_and_reset_to_latest()
-                if not git_sync_success:
-                    self.log.warn(
-                        "git.snapshot_sync_failed",
-                        note="proceeding_with_snapshot_state",
-                    )
-                    git_sync_success = True  # Non-fatal: session can still run on snapshot code
+                await self._update_existing_repo()  # best-effort
+                git_sync_success = True
             elif from_repo_image:
                 git_sync_success = await self._update_existing_repo()
             else:
@@ -959,6 +880,9 @@ class SandboxSupervisor:
                 self.log.info("image_build.complete", duration_ms=duration_ms)
                 await self.shutdown_event.wait()
                 return
+
+            # Phase 3.5: Start code-server (non-blocking, no health check needed)
+            await self.start_code_server()
 
             # Phase 4: Start OpenCode server (in repo directory)
             await self.start_opencode()
@@ -1003,14 +927,6 @@ class SandboxSupervisor:
         """Graceful shutdown of all processes."""
         self.log.info("supervisor.shutdown_start")
 
-        # Terminate proxy
-        if self.proxy_process and self.proxy_process.returncode is None:
-            self.proxy_process.terminate()
-            try:
-                await asyncio.wait_for(self.proxy_process.wait(), timeout=5.0)
-            except TimeoutError:
-                self.proxy_process.kill()
-
         # Terminate bridge first
         if self.bridge_process and self.bridge_process.returncode is None:
             self.bridge_process.terminate()
@@ -1018,6 +934,14 @@ class SandboxSupervisor:
                 await asyncio.wait_for(self.bridge_process.wait(), timeout=5.0)
             except TimeoutError:
                 self.bridge_process.kill()
+
+        # Terminate code-server
+        if self.code_server_process and self.code_server_process.returncode is None:
+            self.code_server_process.terminate()
+            try:
+                await asyncio.wait_for(self.code_server_process.wait(), timeout=5.0)
+            except TimeoutError:
+                self.code_server_process.kill()
 
         # Terminate OpenCode
         if self.opencode_process and self.opencode_process.returncode is None:

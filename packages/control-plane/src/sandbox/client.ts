@@ -39,6 +39,7 @@ export interface CreateSandboxRequest {
   timeoutSeconds?: number;
   branch?: string;
   agent?: string;
+  codeServerEnabled?: boolean;
 }
 
 export interface CreateSandboxResponse {
@@ -46,6 +47,8 @@ export interface CreateSandboxResponse {
   modalObjectId?: string; // Modal's internal object ID for snapshot API
   status: string;
   createdAt: number;
+  codeServerUrl?: string;
+  codeServerPassword?: string;
 }
 
 export interface RestoreSandboxRequest {
@@ -62,6 +65,7 @@ export interface RestoreSandboxRequest {
   timeoutSeconds?: number;
   branch?: string;
   agent?: string;
+  codeServerEnabled?: boolean;
 }
 
 export interface RestoreSandboxResponse {
@@ -69,6 +73,8 @@ export interface RestoreSandboxResponse {
   sandboxId?: string;
   modalObjectId?: string;
   error?: string;
+  codeServerUrl?: string;
+  codeServerPassword?: string;
 }
 
 export interface SnapshotSandboxRequest {
@@ -247,6 +253,7 @@ export class ModalClient {
           timeout_seconds: request.timeoutSeconds || null,
           branch: request.branch || null,
           agent: request.agent || null,
+          code_server_enabled: request.codeServerEnabled ?? false,
         }),
       });
 
@@ -262,6 +269,8 @@ export class ModalClient {
         modal_object_id?: string;
         status: string;
         created_at: number;
+        code_server_url?: string;
+        code_server_password?: string;
       }>;
 
       if (!result.success || !result.data) {
@@ -274,6 +283,8 @@ export class ModalClient {
         modalObjectId: result.data.modal_object_id,
         status: result.data.status,
         createdAt: result.data.created_at,
+        codeServerUrl: result.data.code_server_url,
+        codeServerPassword: result.data.code_server_password,
       };
     } finally {
       log.info("modal.request", {
@@ -323,6 +334,7 @@ export class ModalClient {
           sandbox_auth_token: request.sandboxAuthToken,
           user_env_vars: request.userEnvVars || null,
           timeout_seconds: request.timeoutSeconds || null,
+          code_server_enabled: request.codeServerEnabled ?? false,
         }),
       });
 
@@ -336,6 +348,8 @@ export class ModalClient {
       const result = (await response.json()) as ModalApiResponse<{
         sandbox_id: string;
         modal_object_id?: string;
+        code_server_url?: string;
+        code_server_password?: string;
       }>;
 
       if (!result.success) {
@@ -347,6 +361,8 @@ export class ModalClient {
         success: true,
         sandboxId: result.data?.sandbox_id,
         modalObjectId: result.data?.modal_object_id,
+        codeServerUrl: result.data?.code_server_url,
+        codeServerPassword: result.data?.code_server_password,
       };
     } finally {
       log.info("modal.request", {

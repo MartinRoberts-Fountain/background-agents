@@ -53,6 +53,7 @@ function createMockSession(overrides: Partial<SessionRow> = {}): SessionRow {
     default_agent: null,
     sandbox_provider: null,
     mode: null,
+    code_server_enabled: 0,
     created_at: Date.now() - 60000,
     updated_at: Date.now(),
     ...overrides,
@@ -76,6 +77,8 @@ function createMockSandbox(
     last_activity: Date.now() - 30000,
     last_spawn_error: null,
     last_spawn_error_at: null,
+    code_server_url: null,
+    code_server_password: null,
     created_at: Date.now() - 60000,
     spawn_failure_count: 0,
     last_spawn_failure: 0,
@@ -165,6 +168,20 @@ function createMockStorage(
       if (sandbox) {
         sandbox.last_spawn_error = error;
         sandbox.last_spawn_error_at = timestamp;
+      }
+    }),
+    updateSandboxCodeServer: vi.fn(async (url: string, password: string) => {
+      calls.push(`updateSandboxCodeServer:${url}`);
+      if (sandbox) {
+        sandbox.code_server_url = url;
+        sandbox.code_server_password = password;
+      }
+    }),
+    clearSandboxCodeServer: vi.fn(() => {
+      calls.push("clearSandboxCodeServer");
+      if (sandbox) {
+        sandbox.code_server_url = null;
+        sandbox.code_server_password = null;
       }
     }),
   };

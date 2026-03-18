@@ -9,8 +9,8 @@
   "scripts": {
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "format": "prettier --write packages/",
-    "format:check": "prettier --check packages/",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "npm run test --workspaces --if-present",
     "test:coverage": "npm run test:coverage --workspaces --if-present",
     "test:integration": "npm run test:integration --workspaces --if-present",
@@ -37,7 +37,8 @@
     "node": ">=20.0.0"
   },
   "overrides": {
-    "minimatch": ">=10.0.1"
+    "minimatch": "^10.2.4",
+    "undici": "^7.24.0"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
@@ -51,8 +52,5 @@
       "ruff check --fix",
       "ruff format"
     ]
-  },
-  "dependencies": {
-    "vercel": "^50.23.2"
   }
 }

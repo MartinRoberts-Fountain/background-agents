@@ -11,6 +11,7 @@ import {
   type SourceControlProviderName,
 } from "./source-control";
 import { AgentDefaultsStore } from "./db/agent-defaults";
+import { IntegrationSettingsStore } from "./db/integration-settings";
 import { SessionIndexStore } from "./db/session-index";
 import { UserScmTokenStore, DEFAULT_TOKEN_LIFETIME_MS } from "./db/user-scm-tokens";
 import { buildSessionInternalUrl, SessionInternalPaths } from "./session/contracts";
@@ -18,6 +19,7 @@ import { buildSessionInternalUrl, SessionInternalPaths } from "./session/contrac
 import {
   getValidModelOrDefault,
   isValidReasoningEffort,
+  type CodeServerSettings,
   type SessionStatus,
   type CallbackContext,
   type SpawnChildSessionRequest,
@@ -49,6 +51,33 @@ const logger = createLogger("router");
 const MAX_SPAWN_DEPTH = 2;
 const MAX_CONCURRENT_CHILDREN = 5;
 const MAX_TOTAL_CHILDREN = 15;
+
+/**
+ * Resolve whether code-server should be enabled for a given repo,
+ * checking both the `enabled` setting and the `enabledRepos` allowlist.
+ */
+async function resolveCodeServerEnabled(
+  db: D1Database | undefined,
+  repoOwner: string,
+  repoName: string
+): Promise<boolean> {
+  if (!db) return false;
+  const repo = `${repoOwner}/${repoName}`;
+  try {
+    const store = new IntegrationSettingsStore(db);
+    const { enabledRepos, settings } = await store.getResolvedConfig("code-server", repo);
+    const csSettings = settings as CodeServerSettings;
+    if (csSettings.enabled !== true) return false;
+    // enabledRepos: null → all repos, [] → none, [...] → allowlist
+    if (enabledRepos !== null && !enabledRepos.includes(repo)) return false;
+    return true;
+  } catch (e) {
+    logger.warn("Failed to resolve code-server integration settings, defaulting to disabled", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return false;
+  }
+}
 
 const SESSION_STATUSES: SessionStatus[] = [
   "created",
@@ -401,6 +430,11 @@ const routes: Route[] = [
     handler: handleSessionWsToken,
   },
   {
+    method: "PATCH",
+    pattern: parsePattern("/sessions/:id/title"),
+    handler: handleUpdateSessionTitle,
+  },
+  {
     method: "POST",
     pattern: parsePattern("/sessions/:id/archive"),
     handler: handleArchiveSession,
@@ -619,6 +653,9 @@ async function handleCreateSession(
 ): Promise<Response> {
   const body = (await request.json()) as CreateSessionRequest & {
     scmToken?: string;
+    scmRefreshToken?: string;
+    scmTokenExpiresAt?: number;
+    scmUserId?: string;
     userId?: string;
     scmLogin?: string;
     scmName?: string;
@@ -665,7 +702,11 @@ async function handleCreateSession(
   const scmName = body.scmName;
   const scmEmail = body.scmEmail;
   const scmToken = body.scmToken;
+  const scmRefreshToken = body.scmRefreshToken;
+  const scmTokenExpiresAt = body.scmTokenExpiresAt;
+  const scmUserId = body.scmUserId;
   let scmTokenEncrypted: string | null = null;
+  let scmRefreshTokenEncrypted: string | null = null;
 
   // If SCM token provided, encrypt it
   if (scmToken && env.TOKEN_ENCRYPTION_KEY) {
@@ -676,6 +717,16 @@ async function handleCreateSession(
         error: e instanceof Error ? e : String(e),
       });
       return error("Failed to process SCM token", 500);
+    }
+  }
+
+  if (scmRefreshToken && env.TOKEN_ENCRYPTION_KEY) {
+    try {
+      scmRefreshTokenEncrypted = await encryptToken(scmRefreshToken, env.TOKEN_ENCRYPTION_KEY);
+    } catch (e) {
+      logger.warn("Session created without refresh token — token refresh will be unavailable", {
+        error: e instanceof Error ? e : String(e),
+      });
     }
   }
 
@@ -703,6 +754,8 @@ async function handleCreateSession(
       agent = null;
     }
   }
+  // Resolve code-server integration setting for this repo
+  const codeServerEnabled = await resolveCodeServerEnabled(env.DB, repoOwner, repoName);
 
   // Initialize session with user info and optional encrypted token
   const initResponse = await stub.fetch(
@@ -729,6 +782,10 @@ async function handleCreateSession(
           scmTokenEncrypted,
           sandboxProvider: body.sandboxProvider ?? null,
           mode: body.mode || "apply",
+          scmRefreshTokenEncrypted,
+          scmTokenExpiresAt,
+          scmUserId,
+          codeServerEnabled,
         }),
       },
       ctx
@@ -737,6 +794,24 @@ async function handleCreateSession(
 
   if (!initResponse.ok) {
     return error("Failed to create session", 500);
+  }
+
+  // Populate D1 with the user's SCM tokens (non-blocking) so centralized refresh works
+  if (scmUserId && scmToken && scmRefreshToken && env.TOKEN_ENCRYPTION_KEY) {
+    ctx.executionCtx?.waitUntil(
+      new UserScmTokenStore(env.DB, env.TOKEN_ENCRYPTION_KEY)
+        .upsertTokens(
+          scmUserId,
+          scmToken,
+          scmRefreshToken,
+          scmTokenExpiresAt ?? Date.now() + DEFAULT_TOKEN_LIFETIME_MS
+        )
+        .catch((e) =>
+          logger.error("Failed to write tokens to D1", {
+            error: e instanceof Error ? e : String(e),
+          })
+        )
+    );
   }
 
   // Store session in D1 index for listing
@@ -1162,6 +1237,56 @@ async function handleSessionWsToken(
   return response;
 }
 
+async function handleUpdateSessionTitle(
+  request: Request,
+  env: Env,
+  match: RegExpMatchArray,
+  ctx: RequestContext
+): Promise<Response> {
+  const sessionId = match.groups?.id;
+  if (!sessionId) return error("Session ID required");
+
+  let userId: string | undefined;
+  let title: string | undefined;
+
+  try {
+    const body = (await request.json()) as { userId?: string; title?: string };
+    userId = body.userId;
+    title = body.title;
+  } catch (_error) {
+    // Body parsing failed, continue without userId/title
+    userId = undefined;
+    title = undefined;
+  }
+
+  const doId = env.SESSION.idFromName(sessionId);
+  const stub = env.SESSION.get(doId);
+
+  const response = await stub.fetch(
+    internalRequest(
+      buildSessionInternalUrl(SessionInternalPaths.updateTitle),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, title }),
+      },
+      ctx
+    )
+  );
+
+  if (response.ok) {
+    // read the validated title from the DO response
+    const doResult = (await response.clone().json()) as { title: string };
+    const sessionStore = new SessionIndexStore(env.DB);
+    const updated = await sessionStore.updateTitle(sessionId, doResult.title);
+    if (!updated) {
+      logger.warn("Session not found in D1 index during title update", { session_id: sessionId });
+    }
+  }
+
+  return response;
+}
+
 async function handleArchiveSession(
   request: Request,
   env: Env,
@@ -1336,6 +1461,13 @@ async function handleSpawnChild(
     sandboxProvider,
   });
 
+  // Resolve code-server integration setting for child (same repo as parent)
+  const childCodeServerEnabled = await resolveCodeServerEnabled(
+    env.DB,
+    spawnContext.repoOwner,
+    spawnContext.repoName
+  );
+
   // Initialize child DO
   const initResponse = await childStub.fetch(
     internalRequest(
@@ -1356,12 +1488,16 @@ async function handleSpawnChild(
           scmName: spawnContext.owner.scmName,
           scmEmail: spawnContext.owner.scmEmail,
           scmTokenEncrypted: spawnContext.owner.scmAccessTokenEncrypted,
+          scmRefreshTokenEncrypted: spawnContext.owner.scmRefreshTokenEncrypted,
+          scmTokenExpiresAt: spawnContext.owner.scmTokenExpiresAt,
+          scmUserId: spawnContext.owner.scmUserId,
           branch: spawnContext.baseBranch ?? "main",
           parentSessionId: parentId,
           spawnSource: "agent",
           spawnDepth: childDepth,
           mode,
           sandboxProvider,
+          codeServerEnabled: childCodeServerEnabled,
         }),
       },
       ctx

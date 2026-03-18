@@ -72,6 +72,7 @@ export interface UpsertSessionData {
   defaultAgent?: string | null;
   sandboxProvider?: string | null;
   mode?: string | null;
+  codeServerEnabled?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -230,6 +231,8 @@ export class SessionRepository {
     this.sql.exec(
       `INSERT OR REPLACE INTO session (id, session_name, title, repo_owner, repo_name, repo_id, base_branch, model, reasoning_effort, status, parent_session_id, spawn_source, spawn_depth, default_agent, sandbox_provider, mode, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO session (id, session_name, title, repo_owner, repo_name, repo_id, base_branch, model, reasoning_effort, status, parent_session_id, spawn_source, spawn_depth, code_server_enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       data.id,
       data.sessionName,
       data.title,
@@ -246,6 +249,7 @@ export class SessionRepository {
       data.defaultAgent ?? null,
       data.sandboxProvider ?? null,
       data.mode ?? null,
+      data.codeServerEnabled ? 1 : 0,
       data.createdAt,
       data.updatedAt
     );
@@ -267,6 +271,15 @@ export class SessionRepository {
     this.sql.exec(
       `UPDATE session SET current_sha = ? WHERE id = (SELECT id FROM session LIMIT 1)`,
       sha
+    );
+  }
+
+  updateSessionTitle(sessionId: string, title: string, updatedAt: number): void {
+    this.sql.exec(
+      `UPDATE session SET title = ?, updated_at = ? WHERE id = ?`,
+      title,
+      updatedAt,
+      sessionId
     );
   }
 
@@ -368,6 +381,20 @@ export class SessionRepository {
       `UPDATE sandbox SET last_spawn_error = ?, last_spawn_error_at = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
       error,
       timestamp
+    );
+  }
+
+  updateSandboxCodeServer(url: string, password: string): void {
+    this.sql.exec(
+      `UPDATE sandbox SET code_server_url = ?, code_server_password = ? WHERE id = (SELECT id FROM sandbox LIMIT 1)`,
+      url,
+      password
+    );
+  }
+
+  clearSandboxCodeServer(): void {
+    this.sql.exec(
+      `UPDATE sandbox SET code_server_url = NULL, code_server_password = NULL WHERE id = (SELECT id FROM sandbox LIMIT 1)`
     );
   }
 

@@ -1,6 +1,6 @@
 import type { Logger } from "../../../logger";
 import type { ParticipantRow, SandboxRow, SessionRow } from "../../types";
-import type { SandboxStatus, SessionStatus, SpawnSource } from "../../../types";
+import type { SandboxStatus, ServerMessage, SessionStatus, SpawnSource } from "../../../types";
 import type { SessionRepository } from "../../repository";
 import { getValidModelOrDefault, isValidModel } from "../../../utils/models";
 
@@ -22,15 +22,22 @@ interface InitRequest {
   scmEmail?: string;
   scmToken?: string | null;
   scmTokenEncrypted?: string | null;
+  scmRefreshTokenEncrypted?: string | null;
+  scmTokenExpiresAt?: number | null;
+  scmUserId?: string | null;
   parentSessionId?: string | null;
   spawnSource?: SpawnSource;
   spawnDepth?: number;
   mode?: string | null;
   sandboxProvider?: string | null;
+  codeServerEnabled?: boolean;
 }
 
 export interface SessionLifecycleHandlerDeps {
-  repository: Pick<SessionRepository, "upsertSession" | "createSandbox" | "createParticipant">;
+  repository: Pick<
+    SessionRepository,
+    "upsertSession" | "createSandbox" | "createParticipant" | "updateSessionTitle"
+  >;
   getDurableObjectId: () => string;
   tokenEncryptionKey?: string;
   encryptToken: (token: string, encryptionKey: string) => Promise<string>;
@@ -48,11 +55,13 @@ export interface SessionLifecycleHandlerDeps {
   getSandboxSocket: () => WebSocket | null;
   sendToSandbox: (ws: WebSocket, message: string | object) => boolean;
   updateSandboxStatus: (status: SandboxStatus) => void;
+  broadcast: (message: ServerMessage) => void;
 }
 
 export interface SessionLifecycleHandler {
   init: (request: Request) => Promise<Response>;
   getState: () => Response;
+  updateTitle: (request: Request) => Promise<Response>;
   archive: (request: Request) => Promise<Response>;
   unarchive: (request: Request) => Promise<Response>;
   cancel: () => Promise<Response>;
@@ -112,6 +121,7 @@ export function createSessionLifecycleHandler(
         spawnDepth: body.spawnDepth ?? 0,
         mode: body.mode ?? null,
         sandboxProvider: body.sandboxProvider ?? null,
+        codeServerEnabled: body.codeServerEnabled ?? false,
         createdAt: now,
         updatedAt: now,
       });
@@ -128,10 +138,13 @@ export function createSessionLifecycleHandler(
       deps.repository.createParticipant({
         id: participantId,
         userId: body.userId,
+        scmUserId: body.scmUserId ?? null,
         scmLogin: body.scmLogin ?? null,
         scmName: body.scmName ?? null,
         scmEmail: body.scmEmail ?? null,
         scmAccessTokenEncrypted: encryptedToken,
+        scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
+        scmTokenExpiresAt: body.scmTokenExpiresAt ?? null,
         role: "owner",
         joinedAt: now,
       });
@@ -175,6 +188,49 @@ export function createSessionLifecycleHandler(
             }
           : null,
       });
+    },
+
+    async updateTitle(request: Request): Promise<Response> {
+      const session = deps.getSession();
+      if (!session) {
+        return Response.json({ error: "Session not found" }, { status: 404 });
+      }
+
+      let body: { userId?: string; title?: string };
+      try {
+        body = (await request.json()) as { userId?: string; title?: string };
+      } catch {
+        return Response.json({ error: "Invalid request body" }, { status: 400 });
+      }
+
+      if (!body.userId) {
+        return Response.json({ error: "userId is required" }, { status: 400 });
+      }
+
+      if (typeof body.title !== "string" || body.title.trim().length === 0) {
+        return Response.json({ error: "title must be a non-empty string" }, { status: 400 });
+      }
+
+      if (body.title.length > 200) {
+        return Response.json({ error: "title must be 200 characters or fewer" }, { status: 400 });
+      }
+
+      const participant = deps.getParticipantByUserId(body.userId);
+      if (!participant) {
+        return Response.json(
+          { error: "Not authorized to update the session title" },
+          { status: 403 }
+        );
+      }
+
+      deps.repository.updateSessionTitle(session.id, body.title, deps.now());
+
+      deps.broadcast({
+        type: "session_title",
+        title: body.title,
+      });
+
+      return Response.json({ title: body.title });
     },
 
     async archive(request: Request): Promise<Response> {

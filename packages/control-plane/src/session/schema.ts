@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS session (
   default_agent TEXT,                               -- OpenCode primary agent id (e.g. from .opencode/agents/foo.md)
   sandbox_provider TEXT,                            -- Infrastructure provider override ("modal" or "helm")
   mode TEXT,                                        -- 'plan' or 'apply'
+  code_server_enabled INTEGER NOT NULL DEFAULT 0,   -- 0 = disabled, 1 = enabled (opt-in)
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -104,6 +105,8 @@ CREATE TABLE IF NOT EXISTS sandbox (
   last_spawn_error_at INTEGER,                      -- Timestamp of last spawn error
   spawn_failure_count INTEGER DEFAULT 0,            -- Circuit breaker: consecutive spawn failures
   last_spawn_failure INTEGER,                       -- Timestamp of last spawn failure
+  code_server_url TEXT,                             -- Code-server tunnel URL (rotates on wake/restore)
+  code_server_password TEXT,                        -- Code-server password (rotates on each wake/restore)
   created_at INTEGER NOT NULL
 );
 
@@ -366,6 +369,18 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     id: 30,
     description: "Add mode column to session",
     run: `ALTER TABLE session ADD COLUMN mode TEXT`,
+    description: "Add code-server fields to sandbox",
+    // Two ALTER TABLE statements — partial failure is safe because runMigration()
+    // handles "column already exists" errors, so re-running is idempotent.
+    run: `
+      ALTER TABLE sandbox ADD COLUMN code_server_url TEXT;
+      ALTER TABLE sandbox ADD COLUMN code_server_password TEXT;
+    `,
+  },
+  {
+    id: 27,
+    description: "Add code_server_enabled to session",
+    run: `ALTER TABLE session ADD COLUMN code_server_enabled INTEGER NOT NULL DEFAULT 0`,
   },
 ];
 

@@ -24,6 +24,7 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     default_agent: null,
     sandbox_provider: null,
     mode: null,
+    code_server_enabled: 0,
     created_at: 1000,
     updated_at: 2000,
     ...overrides,
@@ -64,6 +65,8 @@ function createSandbox(overrides: Partial<SandboxRow> = {}): SandboxRow {
     last_activity: null,
     last_spawn_error: null,
     last_spawn_error_at: null,
+    code_server_url: null,
+    code_server_password: null,
     created_at: 1,
     ...overrides,
   };
@@ -161,6 +164,7 @@ describe("createChildSessionsHandler", () => {
       baseBranch: "main",
       owner: {
         userId: "user-1",
+        scmUserId: null,
         scmLogin: "octocat",
         scmName: "The Octocat",
         scmEmail: "octocat@example.com",

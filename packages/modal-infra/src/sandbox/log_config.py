@@ -84,7 +84,7 @@ def configure_logging() -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JSONFormatter())
     logging.root.handlers = [handler]
-    logging.root.setLevel(logging.DEBUG)
+    logging.root.setLevel(logging.INFO)
 
     # Keep our components at DEBUG while reducing verbose transport retries from
     # third-party clients (e.g. expected health-check connect failures).

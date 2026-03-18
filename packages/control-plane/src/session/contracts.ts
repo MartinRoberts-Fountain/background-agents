@@ -22,6 +22,7 @@ export const SessionInternalPaths = {
   vcsTokenRefresh: "/internal/vcs-token-refresh",
   spawnContext: "/internal/spawn-context",
   childSummary: "/internal/child-summary",
+  updateTitle: "/internal/update-title",
   cancel: "/internal/cancel",
   childSessionUpdate: "/internal/child-session-update",
 } as const;

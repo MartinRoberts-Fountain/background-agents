@@ -10,7 +10,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { initSchema } from "./schema";
 import { buildSessionInternalUrl, SessionInternalPaths } from "./contracts";
-import { generateId, hashToken, timingSafeEqual } from "../auth/crypto";
+import { generateId, hashToken, timingSafeEqual, encryptToken, decryptToken } from "../auth/crypto";
 import { getGitHubAppConfig } from "../auth/github-app";
 import { createModalClient } from "../sandbox/client";
 import { createModalProvider } from "../sandbox/providers/modal-provider";
@@ -30,10 +30,7 @@ import {
 } from "../sandbox/lifecycle/manager";
 import { RepoImageStore } from "../db/repo-images";
 import { SessionIndexStore } from "../db/session-index";
-import {
-  evaluateExecutionTimeout,
-  DEFAULT_EXECUTION_TIMEOUT_MS,
-} from "../sandbox/lifecycle/decisions";
+import { DEFAULT_EXECUTION_TIMEOUT_MS } from "../sandbox/lifecycle/decisions";
 import {
   createSourceControlProvider as createSourceControlProviderImpl,
   resolveScmProviderFromEnv,
@@ -87,6 +84,7 @@ import {
   type ParticipantsHandler,
 } from "./http/handlers/participants.handler";
 import { MessageService } from "./services/message.service";
+import { createAlarmHandler, type AlarmHandler } from "./alarm/handler";
 
 /**
  * Timeout for WebSocket authentication (in milliseconds).
@@ -138,6 +136,8 @@ export class SessionDO extends DurableObject<Env> {
   private _pullRequestHandler: PullRequestHandler | null = null;
   // Participants handler (lazily initialized)
   private _participantsHandler: ParticipantsHandler | null = null;
+  // Alarm handler (lazily initialized)
+  private _alarmHandler: AlarmHandler | null = null;
   // Sandbox event processor (lazily initialized)
   private _sandboxEventProcessor: SessionSandboxEventProcessor | null = null;
 
@@ -154,6 +154,7 @@ export class SessionDO extends DurableObject<Env> {
     listArtifacts: () => this.messagesHandler.listArtifacts(),
     listMessages: (_request, url) => this.messagesHandler.listMessages(url),
     wsToken: (request) => this.wsTokenHandler.generateWsToken(request),
+    updateTitle: (request) => this.sessionLifecycleHandler.updateTitle(request),
     archive: (request) => this.sessionLifecycleHandler.archive(request),
     unarchive: (request) => this.sessionLifecycleHandler.unarchive(request),
     createPr: (request) => this.pullRequestHandler.createPr(request),
@@ -419,6 +420,7 @@ export class SessionDO extends DurableObject<Env> {
         getSandboxSocket: () => this.wsManager.getSandboxSocket(),
         sendToSandbox: (ws, message) => this.wsManager.send(ws, message),
         updateSandboxStatus: (status) => this.updateSandboxStatus(status),
+        broadcast: (message) => this.broadcast(message),
       });
     }
 
@@ -468,6 +470,21 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     return this._participantsHandler;
+  }
+
+  private get alarmHandler(): AlarmHandler {
+    if (!this._alarmHandler) {
+      this._alarmHandler = createAlarmHandler({
+        repository: this.repository,
+        messageQueue: this.messageQueue,
+        lifecycleManager: this.lifecycleManager,
+        executionTimeoutMs: this.executionTimeoutMs,
+        now: () => Date.now(),
+        getLog: () => this.log,
+      });
+    }
+
+    return this._alarmHandler;
   }
 
   private get sandboxEventProcessor(): SessionSandboxEventProcessor {
@@ -590,6 +607,13 @@ export class SessionDO extends DurableObject<Env> {
       resetCircuitBreaker: () => this.repository.resetCircuitBreaker(),
       setLastSpawnError: (error, timestamp) =>
         this.repository.updateSandboxSpawnError(error, timestamp),
+      updateSandboxCodeServer: async (url, password) => {
+        const encrypted = this.env.REPO_SECRETS_ENCRYPTION_KEY
+          ? await encryptToken(password, this.env.REPO_SECRETS_ENCRYPTION_KEY)
+          : password;
+        this.repository.updateSandboxCodeServer(url, encrypted);
+      },
+      clearSandboxCodeServer: () => this.repository.clearSandboxCodeServer(),
     };
 
     // Broadcaster adapter
@@ -950,31 +974,7 @@ export class SessionDO extends DurableObject<Env> {
    */
   async alarm(): Promise<void> {
     this.ensureInitialized();
-
-    // Execution timeout check: if a message has been in 'processing' longer than
-    // the configured timeout, fail it. This is idempotent — if the message was
-    // already failed (by onSandboxTerminating or a prior alarm), getProcessingMessageWithStartedAt()
-    // returns null and we skip straight to handleAlarm().
-    const processing = this.repository.getProcessingMessageWithStartedAt();
-    if (processing?.started_at) {
-      const now = Date.now();
-      const result = evaluateExecutionTimeout(
-        processing.started_at,
-        { timeoutMs: this.executionTimeoutMs },
-        now
-      );
-      if (result.isTimedOut) {
-        this.log.warn("Execution timeout: message stuck in processing", {
-          event: "execution.timeout",
-          message_id: processing.id,
-          elapsed_ms: result.elapsedMs,
-          timeout_ms: this.executionTimeoutMs,
-        });
-        await this.messageQueue.failStuckProcessingMessage();
-      }
-    }
-
-    await this.lifecycleManager.handleAlarm();
+    await this.alarmHandler.handle();
   }
 
   /**
@@ -1149,7 +1149,7 @@ export class SessionDO extends DurableObject<Env> {
     // Gather session state and replay events, then send as a single message.
     // Fetch sandbox once and thread it through to avoid a redundant SQLite read.
     const sandbox = this.getSandbox();
-    const state = this.getSessionState(sandbox);
+    const state = await this.getSessionState(sandbox);
     const replay = this.getReplayData();
 
     this.safeSend(ws, {
@@ -1491,11 +1491,25 @@ export class SessionDO extends DurableObject<Env> {
    * Get current session state.
    * Accepts an optional pre-fetched sandbox row to avoid a redundant SQLite read.
    */
-  private getSessionState(sandbox?: SandboxRow | null): SessionState {
+  private async getSessionState(sandbox?: SandboxRow | null): Promise<SessionState> {
     const session = this.getSession();
     sandbox ??= this.getSandbox();
     const messageCount = this.repository.getMessageCount();
     const isProcessing = this.getIsProcessing();
+
+    // Decrypt code-server password if stored encrypted
+    let codeServerPassword: string | null = sandbox?.code_server_password ?? null;
+    if (codeServerPassword && this.env.REPO_SECRETS_ENCRYPTION_KEY) {
+      try {
+        codeServerPassword = await decryptToken(
+          codeServerPassword,
+          this.env.REPO_SECRETS_ENCRYPTION_KEY
+        );
+      } catch {
+        // Key mismatch or corruption — don't leak ciphertext to clients
+        codeServerPassword = null;
+      }
+    }
 
     return {
       id: this.getPublicSessionId(session),
@@ -1513,6 +1527,8 @@ export class SessionDO extends DurableObject<Env> {
       isProcessing,
       parentSessionId: session?.parent_session_id ?? null,
       sandboxProvider: (session?.sandbox_provider as "modal" | "helm" | "ec2" | null) ?? null,
+      codeServerUrl: sandbox?.code_server_url ?? null,
+      codeServerPassword,
     };
   }
 
