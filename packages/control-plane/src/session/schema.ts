@@ -369,6 +369,9 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     id: 30,
     description: "Add mode column to session",
     run: `ALTER TABLE session ADD COLUMN mode TEXT`,
+  },
+  {
+    id: 31,
     description: "Add code-server fields to sandbox",
     // Two ALTER TABLE statements — partial failure is safe because runMigration()
     // handles "column already exists" errors, so re-running is idempotent.
@@ -378,7 +381,7 @@ export const MIGRATIONS: readonly SchemaMigration[] = [
     `,
   },
   {
-    id: 27,
+    id: 32,
     description: "Add code_server_enabled to session",
     run: `ALTER TABLE session ADD COLUMN code_server_enabled INTEGER NOT NULL DEFAULT 0`,
   },

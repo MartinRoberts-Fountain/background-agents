@@ -25,6 +25,7 @@ function createSession(overrides: Partial<SessionRow> = {}): SessionRow {
     default_agent: null,
     sandbox_provider: null,
     mode: null,
+    code_server_enabled: 0,
     created_at: 1000,
     updated_at: 2000,
     ...overrides,
@@ -46,6 +47,8 @@ function createSandbox(overrides: Partial<SandboxRow> = {}): SandboxRow {
     last_activity: null,
     last_spawn_error: null,
     last_spawn_error_at: null,
+    code_server_url: null,
+    code_server_password: null,
     created_at: 1,
     ...overrides,
   };
@@ -75,6 +78,7 @@ function createHandler() {
     upsertSession: vi.fn(),
     createSandbox: vi.fn(),
     createParticipant: vi.fn(),
+    updateSessionTitle: vi.fn(),
   };
   const getDurableObjectId = vi.fn(() => "session-do-id");
   const encryptToken = vi.fn();
@@ -98,6 +102,7 @@ function createHandler() {
   const getSandboxSocket = vi.fn<() => WebSocket | null>();
   const sendToSandbox = vi.fn();
   const updateSandboxStatus = vi.fn();
+  const broadcast = vi.fn();
 
   const handler = createSessionLifecycleHandler({
     repository,
@@ -118,6 +123,7 @@ function createHandler() {
     getSandboxSocket,
     sendToSandbox,
     updateSandboxStatus,
+    broadcast,
   });
 
   return {
@@ -139,6 +145,7 @@ function createHandler() {
     getSandboxSocket,
     sendToSandbox,
     updateSandboxStatus,
+    broadcast,
   };
 }
 
@@ -203,6 +210,7 @@ describe("createSessionLifecycleHandler", () => {
       spawnDepth: 1,
       mode: null,
       sandboxProvider: null,
+      codeServerEnabled: false,
       createdAt: 1234,
       updatedAt: 1234,
     });
@@ -215,10 +223,13 @@ describe("createSessionLifecycleHandler", () => {
     expect(repository.createParticipant).toHaveBeenCalledWith({
       id: "participant-1",
       userId: "user-1",
+      scmUserId: null,
       scmLogin: "octocat",
       scmName: "The Octocat",
       scmEmail: "octocat@example.com",
       scmAccessTokenEncrypted: "encrypted-scm-token",
+      scmRefreshTokenEncrypted: null,
+      scmTokenExpiresAt: null,
       role: "owner",
       joinedAt: 1234,
     });

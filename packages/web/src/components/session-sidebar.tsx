@@ -441,7 +441,7 @@ function SessionListItem({
   const displayTitle = session.title || `${session.repoOwner}/${session.repoName}`;
   const repoInfo = `${session.repoOwner}/${session.repoName}`;
   // Orphan child (parent filtered out) — show a subtle badge
-  const isOrphanChild = session.parentSessionId && session.spawnSource === "agent";
+  const isOrphanChild = session.parentSessionId && session.spawn_source === "agent";
   const [isRenaming, setIsRenaming] = useState(false);
   const [isActionsOpen, setIsActionsOpen] = useState(false);
   const [title, setTitle] = useState(displayTitle);
