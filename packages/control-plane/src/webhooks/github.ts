@@ -5,6 +5,7 @@
  */
 
 import type { GitHubAutomationEvent } from "@open-inspect/shared";
+import { verifyInternalToken } from "../auth/internal";
 import type { Route, RequestContext } from "../routes/shared";
 import { parsePattern, json, error } from "../routes/shared";
 import type { Env } from "../types";
@@ -15,6 +16,18 @@ async function handleGitHubAutomationEvent(
   _match: RegExpMatchArray,
   _ctx: RequestContext
 ): Promise<Response> {
+  // 0. Authenticate — fail closed if secret is unconfigured or token is invalid
+  if (!env.INTERNAL_CALLBACK_SECRET) {
+    return error("Internal authentication not configured", 500);
+  }
+  const isValid = await verifyInternalToken(
+    request.headers.get("Authorization"),
+    env.INTERNAL_CALLBACK_SECRET
+  );
+  if (!isValid) {
+    return error("Unauthorized", 401);
+  }
+
   // 1. Parse body
   let body: unknown;
   try {
@@ -43,13 +56,24 @@ async function handleGitHubAutomationEvent(
   const doId = env.SCHEDULER.idFromName("global-scheduler");
   const stub = env.SCHEDULER.get(doId);
 
-  const response = await stub.fetch("http://internal/internal/event", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(event),
-  });
+  let response: Response;
+  try {
+    response = await stub.fetch("http://internal/internal/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(event),
+    });
+  } catch (_e) {
+    return json({ ok: false, error: "Failed to reach scheduler" }, 502);
+  }
 
-  const result = await response.json<{ triggered: number; skipped: number }>();
+  let result: { triggered: number; skipped: number };
+  try {
+    result = await response.json<{ triggered: number; skipped: number }>();
+  } catch {
+    return json({ ok: false, error: "Invalid response from scheduler" }, 502);
+  }
+
   return json({ ok: true, ...result }, response.status === 200 ? 200 : response.status);
 }
 

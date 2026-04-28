@@ -116,7 +116,9 @@ function normalizePullRequest(
   const pr = getPR(payload);
   if (!pr) return null;
 
-  const prNumber = pr.number as number;
+  const prNumber = pr.number;
+  if (typeof prNumber !== "number" || !Number.isFinite(prNumber)) return null;
+
   const headSha = (pr.head as Record<string, unknown> | undefined)?.sha as string | undefined;
   const branch = (pr.head as Record<string, unknown> | undefined)?.ref as string | undefined;
   const labels = getPRLabels(pr);
@@ -154,10 +156,14 @@ function normalizeIssueComment(
   const issue = getIssue(payload);
   if (!comment) return null;
 
-  const commentId = comment.id as number;
-  const issueNumber = issue?.number as number | undefined;
+  const commentId = comment.id;
+  if (typeof commentId !== "number" || !Number.isFinite(commentId)) return null;
+
+  const issueNumber = issue?.number;
+  if (typeof issueNumber !== "number" || !Number.isFinite(issueNumber)) return null;
+
   const triggerKey = `issue_comment:${commentId}`;
-  const concurrencyKey = `issue:${issueNumber ?? "unknown"}`;
+  const concurrencyKey = `issue:${issueNumber}`;
 
   return {
     source: "github",
@@ -186,11 +192,13 @@ function normalizeReviewComment(
   const pr = getPR(payload);
   if (!comment) return null;
 
-  const commentId = comment.id as number;
-  const prNumber = pr?.number as number | undefined;
+  const commentId = comment.id;
+  if (typeof commentId !== "number" || !Number.isFinite(commentId)) return null;
+
+  const prNumber = pr?.number;
   const branch = (pr?.head as Record<string, unknown> | undefined)?.ref as string | undefined;
   const triggerKey = `pr_review_comment:${commentId}`;
-  const concurrencyKey = `pr:${prNumber ?? "unknown"}`;
+  const concurrencyKey = `pr:${typeof prNumber === "number" && Number.isFinite(prNumber) ? prNumber : "unknown"}`;
 
   return {
     source: "github",
@@ -219,7 +227,9 @@ function normalizeCheckSuite(
   const checkSuite = getCheckSuite(payload);
   if (!checkSuite) return null;
 
-  const checkSuiteId = checkSuite.id as number;
+  const checkSuiteId = checkSuite.id;
+  if (typeof checkSuiteId !== "number" || !Number.isFinite(checkSuiteId)) return null;
+
   const conclusion = checkSuite.conclusion as string | undefined;
   const headBranch = checkSuite.head_branch as string | undefined;
   const triggerKey = `check_suite:${checkSuiteId}`;
@@ -254,7 +264,9 @@ function normalizeIssue(
   const issue = getIssue(payload);
   if (!issue) return null;
 
-  const issueNumber = issue.number as number;
+  const issueNumber = issue.number;
+  if (typeof issueNumber !== "number" || !Number.isFinite(issueNumber)) return null;
+
   const labels = getIssueLabels(issue);
   const triggerKey = `issue:${issueNumber}:${action}`;
   const concurrencyKey = `issue:${issueNumber}`;

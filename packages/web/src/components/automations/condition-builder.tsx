@@ -200,7 +200,7 @@ function ConditionEditor({
           <TagInput
             values={condition.value}
             onChange={(value) => onChange({ ...condition, value })}
-            placeholder="Add GitHub username..."
+            placeholder="Add actor username..."
           />
         </div>
       );

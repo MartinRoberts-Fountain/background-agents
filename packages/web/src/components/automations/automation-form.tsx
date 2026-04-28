@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import {
   DEFAULT_MODEL,
   getReasoningConfig,
@@ -117,10 +117,19 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
   const isScheduleValid = !isSchedule || isValidCron(scheduleCron);
 
   // Get event types for the selected trigger type
-  const triggerSourceDef = triggerSources.find(
-    (s) => TRIGGER_TYPE_TO_SOURCE[triggerType] === s.source
-  );
-  const eventTypes = triggerSourceDef?.eventTypes ?? [];
+  const eventTypes = useMemo(() => {
+    const triggerSourceDef = triggerSources.find(
+      (s) => TRIGGER_TYPE_TO_SOURCE[triggerType] === s.source
+    );
+    return triggerSourceDef?.eventTypes ?? [];
+  }, [triggerType]);
+
+  // Reset eventType when it becomes invalid for the current trigger type
+  useEffect(() => {
+    if (!eventType) return;
+    const stillValid = eventTypes.some((et) => et.eventType === eventType);
+    if (!stillValid) setEventType("");
+  }, [eventType, eventTypes]);
 
   const handleRepoChange = useCallback(
     (repoFullName: string) => {

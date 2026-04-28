@@ -3,6 +3,7 @@
  */
 
 const BODY_PREVIEW_MAX = 500;
+const MAX_DIFF_HUNK_CHARS = 1000;
 const GITHUB_EVENT_PREAMBLE = "This automation was triggered by a GitHub event.";
 
 export function buildGitHubContextBlock(
@@ -10,9 +11,9 @@ export function buildGitHubContextBlock(
   payload: Record<string, unknown>
 ): string {
   const repo = payload.repository as Record<string, unknown> | undefined;
-  const repoFullName = repo
-    ? `${(repo.owner as Record<string, unknown>)?.login}/${repo.name}`
-    : "unknown";
+  const ownerLogin = (repo?.owner as Record<string, unknown> | undefined)?.login ?? "unknown";
+  const repoName = repo?.name ?? "unknown";
+  const repoFullName = repo ? `${ownerLogin}/${repoName}` : "unknown";
 
   if (eventType.startsWith("pull_request.")) {
     return buildPullRequestContext(eventType, payload, repoFullName);
@@ -158,9 +159,13 @@ function buildReviewCommentContext(payload: Record<string, unknown>, repoFullNam
   }
 
   if (diffHunk) {
+    const truncatedHunk =
+      diffHunk.length > MAX_DIFF_HUNK_CHARS
+        ? diffHunk.slice(0, MAX_DIFF_HUNK_CHARS) + "... [truncated]"
+        : diffHunk;
     lines.push("");
     lines.push("Diff context:");
-    lines.push(diffHunk);
+    lines.push(truncatedHunk);
   }
 
   return lines.join("\n");

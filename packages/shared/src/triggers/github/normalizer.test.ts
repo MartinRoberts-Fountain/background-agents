@@ -279,4 +279,63 @@ describe("normalizeGitHubEvent", () => {
       expect(normalizeGitHubEvent("deployment", { action: "created" })).toBeNull();
     });
   });
+
+  describe("malformed payloads (missing required identifiers)", () => {
+    it("returns null for pull_request without a numeric pr number", () => {
+      const payload = {
+        action: "opened",
+        repository: repo,
+        sender,
+        pull_request: { ...basePR, number: undefined },
+      };
+      expect(normalizeGitHubEvent("pull_request", payload)).toBeNull();
+    });
+
+    it("returns null for issue_comment without a numeric comment id", () => {
+      const payload = {
+        action: "created",
+        repository: repo,
+        sender,
+        issue: { number: 10, title: "Bug" },
+        comment: { user: { login: "user" }, body: "text" },
+      };
+      expect(normalizeGitHubEvent("issue_comment", payload)).toBeNull();
+    });
+
+    it("returns null for issue_comment without a numeric issue number", () => {
+      const payload = {
+        action: "created",
+        repository: repo,
+        sender,
+        issue: { title: "Bug" },
+        comment: { id: 9001, user: { login: "user" }, body: "text" },
+      };
+      expect(normalizeGitHubEvent("issue_comment", payload)).toBeNull();
+    });
+
+    it("returns null for check_suite without a numeric id", () => {
+      const payload = {
+        action: "completed",
+        repository: repo,
+        sender,
+        check_suite: {
+          head_branch: "main",
+          head_sha: "abc123",
+          conclusion: "success",
+          pull_requests: [],
+        },
+      };
+      expect(normalizeGitHubEvent("check_suite", payload)).toBeNull();
+    });
+
+    it("returns null for issues without a numeric issue number", () => {
+      const payload = {
+        action: "opened",
+        repository: repo,
+        sender,
+        issue: { title: "Bug", body: "text", user: { login: "user" }, labels: [] },
+      };
+      expect(normalizeGitHubEvent("issues", payload)).toBeNull();
+    });
+  });
 });

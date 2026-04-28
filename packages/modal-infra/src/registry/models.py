@@ -3,7 +3,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SnapshotStatus(StrEnum):
@@ -27,7 +27,7 @@ class Repository(BaseModel):
     # Optional: specific paths to warm cache
     cache_paths: list[str] = []
     # Build frequency override (default 30 min)
-    build_interval_minutes: int = 30
+    build_interval_minutes: int = Field(default=30, ge=0)
 
 
 class Snapshot(BaseModel):
@@ -41,7 +41,7 @@ class Snapshot(BaseModel):
     created_at: datetime
     expires_at: datetime | None = None
     # Build metadata
-    build_duration_seconds: float | None = None
+    build_duration_seconds: float | None = Field(default=None, ge=0)
     error_message: str | None = None
 
 
