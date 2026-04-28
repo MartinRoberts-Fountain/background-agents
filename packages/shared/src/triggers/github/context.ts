@@ -2,9 +2,13 @@
  * Build context blocks for GitHub automation events.
  */
 
-const BODY_PREVIEW_MAX = 500;
-const MAX_DIFF_HUNK_CHARS = 1000;
-const GITHUB_EVENT_PREAMBLE = "This automation was triggered by a GitHub event.";
+const GITHUB_CONTEXT_CONSTANTS = {
+  GITHUB_EVENT_PREAMBLE: "This automation was triggered by a GitHub event.",
+  BODY_PREVIEW_MAX: 500, // Keeps prompt context compact while preserving enough issue/PR text for triage.
+  MAX_DIFF_HUNK_CHARS: 1000, // Caps diff snippets so large hunks do not dominate token/character budget.
+} as const;
+
+const { GITHUB_EVENT_PREAMBLE, BODY_PREVIEW_MAX, MAX_DIFF_HUNK_CHARS } = GITHUB_CONTEXT_CONSTANTS;
 
 export function buildGitHubContextBlock(
   eventType: string,

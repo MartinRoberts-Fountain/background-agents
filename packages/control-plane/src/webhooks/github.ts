@@ -74,7 +74,7 @@ async function handleGitHubAutomationEvent(
     return json({ ok: false, error: "Invalid response from scheduler" }, 502);
   }
 
-  return json({ ok: true, ...result }, response.status === 200 ? 200 : response.status);
+  return json({ ok: true, ...result }, response.status);
 }
 
 export const githubAutomationEventRoute: Route = {

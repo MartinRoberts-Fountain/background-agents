@@ -13,6 +13,8 @@ export const githubSource: TriggerSourceDefinition = {
   triggerType: "github_event",
   displayName: "GitHub",
   description: "Trigger on GitHub pull request, issue, or CI events",
+  supportsEventTypes: true,
+  eventTypePlaceholder: "Select GitHub event type...",
   eventTypes: [
     {
       eventType: "pull_request.opened",

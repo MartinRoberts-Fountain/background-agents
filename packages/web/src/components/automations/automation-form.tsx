@@ -116,13 +116,15 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
   const isSchedule = triggerType === "schedule";
   const isScheduleValid = !isSchedule || isValidCron(scheduleCron);
 
-  // Get event types for the selected trigger type
-  const eventTypes = useMemo(() => {
-    const triggerSourceDef = triggerSources.find(
-      (s) => TRIGGER_TYPE_TO_SOURCE[triggerType] === s.source
-    );
-    return triggerSourceDef?.eventTypes ?? [];
-  }, [triggerType]);
+  const triggerMetadata = useMemo(
+    () => triggerSources.find((sourceDef) => sourceDef.triggerType === triggerType),
+    [triggerType]
+  );
+  const eventTypes = triggerMetadata?.eventTypes ?? [];
+  const showEventTypeSelector = Boolean(
+    triggerMetadata?.supportsEventTypes && eventTypes.length > 0
+  );
+  const eventTypePlaceholder = triggerMetadata?.eventTypePlaceholder || "Select event type...";
 
   // Reset eventType when it becomes invalid for the current trigger type
   useEffect(() => {
@@ -362,13 +364,13 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
         </>
       )}
 
-      {/* Event type selector (for Sentry and GitHub) */}
-      {(triggerType === "sentry" || triggerType === "github_event") && eventTypes.length > 0 && (
+      {/* Event type selector (for trigger sources with event type support) */}
+      {showEventTypeSelector && (
         <div>
           <label className="block text-sm font-medium text-foreground mb-1.5">Event Type</label>
           <Select value={eventType} onValueChange={setEventType}>
             <SelectTrigger className="w-full">
-              <SelectValue placeholder="Select event type..." />
+              <SelectValue placeholder={eventTypePlaceholder} />
             </SelectTrigger>
             <SelectContent>
               {eventTypes.map((et) => (

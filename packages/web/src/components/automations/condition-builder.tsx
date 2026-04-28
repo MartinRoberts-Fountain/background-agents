@@ -32,6 +32,13 @@ const CONDITION_LABELS: Record<string, string> = {
 };
 
 const SENTRY_LEVELS = ["warning", "error", "fatal"];
+export const CHECK_CONCLUSION_OPTIONS = [
+  "success",
+  "failure",
+  "neutral",
+  "cancelled",
+  "timed_out",
+] as const;
 
 export function ConditionBuilder({ conditions, onChange, triggerSource }: ConditionBuilderProps) {
   // Get available condition types for this trigger source
@@ -68,7 +75,11 @@ export function ConditionBuilder({ conditions, onChange, triggerSource }: Condit
         newCondition = { type: "actor", operator: "include", value: [] };
         break;
       case "check_conclusion":
-        newCondition = { type: "check_conclusion", operator: "eq", value: "success" };
+        newCondition = {
+          type: "check_conclusion",
+          operator: "eq",
+          value: CHECK_CONCLUSION_OPTIONS[0],
+        };
         break;
       default:
         return;
@@ -211,11 +222,11 @@ function ConditionEditor({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="success">success</SelectItem>
-            <SelectItem value="failure">failure</SelectItem>
-            <SelectItem value="neutral">neutral</SelectItem>
-            <SelectItem value="cancelled">cancelled</SelectItem>
-            <SelectItem value="timed_out">timed_out</SelectItem>
+            {CHECK_CONCLUSION_OPTIONS.map((option) => (
+              <SelectItem key={option} value={option}>
+                {option}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       );
