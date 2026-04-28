@@ -52,7 +52,7 @@ function buildPullRequestContext(
     return `${GITHUB_EVENT_PREAMBLE}\n\nEvent: ${eventType}\nRepository: ${repoFullName}`;
   }
 
-  const prNumber = pr.number;
+  const prNumber = pr.number ?? "unknown";
   const title = pr.title as string | undefined;
   const author = (pr.user as Record<string, unknown> | undefined)?.login;
   const headRef = (pr.head as Record<string, unknown> | undefined)?.ref;
@@ -104,7 +104,7 @@ function buildIssueCommentContext(payload: Record<string, unknown>, repoFullName
   const commenter = (comment?.user as Record<string, unknown> | undefined)?.login;
   const commentBody = comment?.body as string | undefined;
   const bodyPreview = commentBody ? commentBody.slice(0, BODY_PREVIEW_MAX) : undefined;
-  const issueNumber = issue?.number;
+  const issueNumber = issue?.number ?? "unknown";
   const issueTitle = issue?.title as string | undefined;
 
   const lines: string[] = [
@@ -135,7 +135,7 @@ function buildReviewCommentContext(payload: Record<string, unknown>, repoFullNam
   const commenter = (comment?.user as Record<string, unknown> | undefined)?.login;
   const commentBody = comment?.body as string | undefined;
   const bodyPreview = commentBody ? commentBody.slice(0, BODY_PREVIEW_MAX) : undefined;
-  const prNumber = pr?.number;
+  const prNumber = pr?.number ?? "unknown";
   const prTitle = pr?.title as string | undefined;
   const diffHunk = comment?.diff_hunk as string | undefined;
   const path = comment?.path as string | undefined;
