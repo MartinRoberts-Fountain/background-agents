@@ -59,7 +59,13 @@ type ProcessingFailureReason =
   | "execution_timeout"
   | "heartbeat_stale"
   | "inactivity_timeout"
-  | "connecting_timeout";
+  | "connecting_timeout"
+  | (string & {});
+
+type ProcessingFailure = {
+  reason: ProcessingFailureReason;
+  error?: string;
+};
 
 const FAILURE_REASON_TO_ERROR: Record<ProcessingFailureReason, string> = {
   execution_timeout: "Execution timed out (stuck processing)",
@@ -67,6 +73,21 @@ const FAILURE_REASON_TO_ERROR: Record<ProcessingFailureReason, string> = {
   inactivity_timeout: "Execution interrupted: sandbox stopped due to inactivity",
   connecting_timeout: "Execution interrupted: sandbox failed to connect",
 };
+
+function resolveProcessingFailure(failure: ProcessingFailureReason | ProcessingFailure): {
+  reason: string;
+  error: string;
+} {
+  const reason = typeof failure === "string" ? failure : failure.reason;
+  const normalizedReason = reason.trim() || "unknown";
+  const explicitError = typeof failure === "string" ? undefined : failure.error?.trim();
+  const mappedError = FAILURE_REASON_TO_ERROR[normalizedReason];
+
+  return {
+    reason: normalizedReason,
+    error: explicitError || mappedError || `Execution interrupted: ${normalizedReason}`,
+  };
+}
 
 export class SessionMessageQueue {
   constructor(private readonly deps: MessageQueueDeps) {}
@@ -291,7 +312,7 @@ export class SessionMessageQueue {
    * prompt could be dispatched to a sandbox being shut down.
    */
   async failStuckProcessingMessage(
-    reason: ProcessingFailureReason = "execution_timeout"
+    failure: ProcessingFailureReason | ProcessingFailure = "execution_timeout"
   ): Promise<void> {
     const now = Date.now();
     const processingMessage = this.deps.repository.getProcessingMessage();
@@ -299,12 +320,12 @@ export class SessionMessageQueue {
 
     this.deps.repository.updateMessageCompletion(processingMessage.id, "failed", now);
 
-    const stuckError = FAILURE_REASON_TO_ERROR[reason];
+    const { reason, error } = resolveProcessingFailure(failure);
     const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
       type: "execution_complete",
       messageId: processingMessage.id,
       success: false,
-      error: stuckError,
+      error,
       sandboxId: "",
       timestamp: now / 1000,
     };
@@ -313,12 +334,12 @@ export class SessionMessageQueue {
       event: "prompt.fail_processing",
       message_id: processingMessage.id,
       reason,
-      error: stuckError,
+      error,
     });
     this.deps.broadcast({ type: "sandbox_event", event: syntheticEvent });
     this.deps.broadcast({ type: "processing_status", isProcessing: false });
     this.deps.ctx.waitUntil(
-      this.deps.callbackService.notifyComplete(processingMessage.id, false, stuckError)
+      this.deps.callbackService.notifyComplete(processingMessage.id, false, error)
     );
     await this.deps.reconcileSessionStatusAfterExecution(false);
   }
