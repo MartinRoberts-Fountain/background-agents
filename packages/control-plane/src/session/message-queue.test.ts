@@ -149,6 +149,7 @@ function buildQueue(options?: { getClientInfo?: (ws: WebSocket) => ClientInfo | 
     participantService,
     broadcast,
     spawnSandbox,
+    callbackService,
     setSessionStatus,
     reconcileSessionStatusAfterExecution,
     waitUntil,
@@ -244,9 +245,14 @@ describe("SessionMessageQueue", () => {
     const h = buildQueue();
     h.repository.getProcessingMessage.mockReturnValue({ id: "msg-timeout" });
 
-    await h.queue.failStuckProcessingMessage();
+    await h.queue.failStuckProcessingMessage("inactivity_timeout");
 
     expect(h.reconcileSessionStatusAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
+      "msg-timeout",
+      false,
+      "Execution interrupted: sandbox stopped due to inactivity"
+    );
   });
 
   describe("enqueuePromptFromApi", () => {

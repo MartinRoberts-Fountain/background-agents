@@ -55,6 +55,19 @@ interface StopExecutionOptions {
   suppressStatusReconcile?: boolean;
 }
 
+type ProcessingFailureReason =
+  | "execution_timeout"
+  | "heartbeat_stale"
+  | "inactivity_timeout"
+  | "connecting_timeout";
+
+const FAILURE_REASON_TO_ERROR: Record<ProcessingFailureReason, string> = {
+  execution_timeout: "Execution timed out (stuck processing)",
+  heartbeat_stale: "Execution interrupted: sandbox heartbeat timed out",
+  inactivity_timeout: "Execution interrupted: sandbox stopped due to inactivity",
+  connecting_timeout: "Execution interrupted: sandbox failed to connect",
+};
+
 export class SessionMessageQueue {
   constructor(private readonly deps: MessageQueueDeps) {}
 
@@ -277,14 +290,16 @@ export class SessionMessageQueue {
    * to the sandbox or call processMessageQueue(). This avoids races where a new
    * prompt could be dispatched to a sandbox being shut down.
    */
-  async failStuckProcessingMessage(): Promise<void> {
+  async failStuckProcessingMessage(
+    reason: ProcessingFailureReason = "execution_timeout"
+  ): Promise<void> {
     const now = Date.now();
     const processingMessage = this.deps.repository.getProcessingMessage();
     if (!processingMessage) return;
 
     this.deps.repository.updateMessageCompletion(processingMessage.id, "failed", now);
 
-    const stuckError = "Execution timed out (stuck processing)";
+    const stuckError = FAILURE_REASON_TO_ERROR[reason];
     const syntheticEvent: Extract<SandboxEvent, { type: "execution_complete" }> = {
       type: "execution_complete",
       messageId: processingMessage.id,
@@ -294,6 +309,12 @@ export class SessionMessageQueue {
       timestamp: now / 1000,
     };
     this.deps.repository.upsertExecutionCompleteEvent(processingMessage.id, syntheticEvent, now);
+    this.deps.log.warn("prompt.fail_processing", {
+      event: "prompt.fail_processing",
+      message_id: processingMessage.id,
+      reason,
+      error: stuckError,
+    });
     this.deps.broadcast({ type: "sandbox_event", event: syntheticEvent });
     this.deps.broadcast({ type: "processing_status", isProcessing: false });
     this.deps.ctx.waitUntil(

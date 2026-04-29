@@ -81,7 +81,7 @@ describe("createAlarmHandler", () => {
       elapsed_ms: 1500,
       timeout_ms: 1000,
     });
-    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledTimes(1);
+    expect(messageQueue.failStuckProcessingMessage).toHaveBeenCalledWith("execution_timeout");
     expect(lifecycleManager.handleAlarm).toHaveBeenCalledTimes(1);
   });
 });
