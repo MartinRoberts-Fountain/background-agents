@@ -2,6 +2,15 @@
  * Build context blocks for GitHub automation events.
  */
 
+import type {
+  CheckSuitePayload,
+  IssueCommentPayload,
+  IssuesPayload,
+  PullRequestPayload,
+  PullRequestReviewCommentPayload,
+  SupportedGitHubPayload,
+} from "./webhook-types";
+
 const GITHUB_CONTEXT_CONSTANTS = {
   GITHUB_EVENT_PREAMBLE: "This automation was triggered by a GitHub event.",
   BODY_PREVIEW_MAX: 500, // Keeps prompt context compact while preserving enough issue/PR text for triage.
@@ -12,31 +21,31 @@ const { GITHUB_EVENT_PREAMBLE, BODY_PREVIEW_MAX, MAX_DIFF_HUNK_CHARS } = GITHUB_
 
 export function buildGitHubContextBlock(
   eventType: string,
-  payload: Record<string, unknown>
+  payload: SupportedGitHubPayload
 ): string {
-  const repo = payload.repository as Record<string, unknown> | undefined;
-  const ownerLogin = (repo?.owner as Record<string, unknown> | undefined)?.login ?? "unknown";
+  const repo = payload.repository;
+  const ownerLogin = repo?.owner?.login ?? "unknown";
   const repoName = repo?.name ?? "unknown";
   const repoFullName = repo ? `${ownerLogin}/${repoName}` : "unknown";
 
   if (eventType.startsWith("pull_request.")) {
-    return buildPullRequestContext(eventType, payload, repoFullName);
+    return buildPullRequestContext(eventType, payload as PullRequestPayload, repoFullName);
   }
 
   if (eventType === "issue_comment.created") {
-    return buildIssueCommentContext(payload, repoFullName);
+    return buildIssueCommentContext(payload as IssueCommentPayload, repoFullName);
   }
 
   if (eventType === "pull_request_review_comment.created") {
-    return buildReviewCommentContext(payload, repoFullName);
+    return buildReviewCommentContext(payload as PullRequestReviewCommentPayload, repoFullName);
   }
 
   if (eventType === "check_suite.completed") {
-    return buildCheckSuiteContext(payload, repoFullName);
+    return buildCheckSuiteContext(payload as CheckSuitePayload, repoFullName);
   }
 
   if (eventType.startsWith("issues.")) {
-    return buildIssueContext(eventType, payload, repoFullName);
+    return buildIssueContext(eventType, payload as IssuesPayload, repoFullName);
   }
 
   return `${GITHUB_EVENT_PREAMBLE}\n\nEvent: ${eventType}\nRepository: ${repoFullName}`;
@@ -44,24 +53,23 @@ export function buildGitHubContextBlock(
 
 function buildPullRequestContext(
   eventType: string,
-  payload: Record<string, unknown>,
+  payload: PullRequestPayload,
   repoFullName: string
 ): string {
-  const pr = payload.pull_request as Record<string, unknown> | undefined;
+  const pr = payload.pull_request;
   if (!pr) {
     return `${GITHUB_EVENT_PREAMBLE}\n\nEvent: ${eventType}\nRepository: ${repoFullName}`;
   }
 
   const prNumber = pr.number ?? "unknown";
-  const title = pr.title as string | undefined;
-  const author = (pr.user as Record<string, unknown> | undefined)?.login;
-  const headRef = (pr.head as Record<string, unknown> | undefined)?.ref;
-  const baseRef = (pr.base as Record<string, unknown> | undefined)?.ref;
-  const rawLabels = pr.labels as Array<Record<string, unknown>> | undefined;
-  const labels = rawLabels?.map((l) => l.name as string).filter(Boolean) ?? [];
-  const body = pr.body as string | undefined;
+  const title = pr.title ?? undefined;
+  const author = pr.user?.login;
+  const headRef = pr.head?.ref;
+  const baseRef = pr.base?.ref;
+  const labels = pr.labels?.map((l) => l.name).filter(Boolean) ?? [];
+  const body = pr.body ?? undefined;
   const bodyPreview = body ? body.slice(0, BODY_PREVIEW_MAX) : undefined;
-  const merged = pr.merged as boolean | undefined;
+  const merged = pr.merged ?? undefined;
 
   const action = eventType.split(".")[1];
 
@@ -97,15 +105,15 @@ function buildPullRequestContext(
   return lines.join("\n");
 }
 
-function buildIssueCommentContext(payload: Record<string, unknown>, repoFullName: string): string {
-  const comment = payload.comment as Record<string, unknown> | undefined;
-  const issue = payload.issue as Record<string, unknown> | undefined;
+function buildIssueCommentContext(payload: IssueCommentPayload, repoFullName: string): string {
+  const comment = payload.comment;
+  const issue = payload.issue;
 
-  const commenter = (comment?.user as Record<string, unknown> | undefined)?.login;
-  const commentBody = comment?.body as string | undefined;
+  const commenter = comment?.user?.login;
+  const commentBody = comment?.body ?? undefined;
   const bodyPreview = commentBody ? commentBody.slice(0, BODY_PREVIEW_MAX) : undefined;
   const issueNumber = issue?.number ?? "unknown";
-  const issueTitle = issue?.title as string | undefined;
+  const issueTitle = issue?.title ?? undefined;
 
   const lines: string[] = [
     GITHUB_EVENT_PREAMBLE,
@@ -128,17 +136,20 @@ function buildIssueCommentContext(payload: Record<string, unknown>, repoFullName
   return lines.join("\n");
 }
 
-function buildReviewCommentContext(payload: Record<string, unknown>, repoFullName: string): string {
-  const comment = payload.comment as Record<string, unknown> | undefined;
-  const pr = payload.pull_request as Record<string, unknown> | undefined;
+function buildReviewCommentContext(
+  payload: PullRequestReviewCommentPayload,
+  repoFullName: string
+): string {
+  const comment = payload.comment;
+  const pr = payload.pull_request;
 
-  const commenter = (comment?.user as Record<string, unknown> | undefined)?.login;
-  const commentBody = comment?.body as string | undefined;
+  const commenter = comment?.user?.login;
+  const commentBody = comment?.body ?? undefined;
   const bodyPreview = commentBody ? commentBody.slice(0, BODY_PREVIEW_MAX) : undefined;
   const prNumber = pr?.number ?? "unknown";
-  const prTitle = pr?.title as string | undefined;
-  const diffHunk = comment?.diff_hunk as string | undefined;
-  const path = comment?.path as string | undefined;
+  const prTitle = pr?.title ?? undefined;
+  const diffHunk = comment?.diff_hunk ?? undefined;
+  const path = comment?.path ?? undefined;
 
   const lines: string[] = [
     GITHUB_EVENT_PREAMBLE,
@@ -175,13 +186,13 @@ function buildReviewCommentContext(payload: Record<string, unknown>, repoFullNam
   return lines.join("\n");
 }
 
-function buildCheckSuiteContext(payload: Record<string, unknown>, repoFullName: string): string {
-  const checkSuite = payload.check_suite as Record<string, unknown> | undefined;
+function buildCheckSuiteContext(payload: CheckSuitePayload, repoFullName: string): string {
+  const checkSuite = payload.check_suite;
 
-  const conclusion = checkSuite?.conclusion as string | undefined;
-  const headBranch = checkSuite?.head_branch as string | undefined;
-  const headSha = checkSuite?.head_sha as string | undefined;
-  const pullRequests = checkSuite?.pull_requests as Array<Record<string, unknown>> | undefined;
+  const conclusion = checkSuite?.conclusion ?? undefined;
+  const headBranch = checkSuite?.head_branch ?? undefined;
+  const headSha = checkSuite?.head_sha ?? undefined;
+  const pullRequests = checkSuite?.pull_requests;
   const prNumbers = pullRequests?.map((pr) => `#${pr.number}`).join(", ");
 
   const lines: string[] = [
@@ -209,20 +220,19 @@ function buildCheckSuiteContext(payload: Record<string, unknown>, repoFullName: 
 
 function buildIssueContext(
   eventType: string,
-  payload: Record<string, unknown>,
+  payload: IssuesPayload,
   repoFullName: string
 ): string {
-  const issue = payload.issue as Record<string, unknown> | undefined;
+  const issue = payload.issue;
   if (!issue) {
     return `${GITHUB_EVENT_PREAMBLE}\n\nEvent: ${eventType}\nRepository: ${repoFullName}`;
   }
 
   const issueNumber = issue.number;
-  const title = issue.title as string | undefined;
-  const author = (issue.user as Record<string, unknown> | undefined)?.login;
-  const rawLabels = issue.labels as Array<Record<string, unknown>> | undefined;
-  const labels = rawLabels?.map((l) => l.name as string).filter(Boolean) ?? [];
-  const body = issue.body as string | undefined;
+  const title = issue.title ?? undefined;
+  const author = issue.user?.login;
+  const labels = issue.labels?.map((l) => l.name).filter(Boolean) ?? [];
+  const body = issue.body ?? undefined;
   const bodyPreview = body ? body.slice(0, BODY_PREVIEW_MAX) : undefined;
 
   const lines: string[] = [
