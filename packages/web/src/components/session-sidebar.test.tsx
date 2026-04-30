@@ -74,15 +74,6 @@ function jsonResponse(body: unknown) {
   });
 }
 
-function simulateLongPress(element: HTMLElement, durationMs = MOBILE_LONG_PRESS_MS) {
-  vi.useFakeTimers();
-  fireEvent.touchStart(element, { touches: [{ clientX: 20, clientY: 20 }] });
-  act(() => {
-    vi.advanceTimersByTime(durationMs);
-  });
-  vi.useRealTimers();
-}
-
 describe("SessionSidebar", () => {
   it("loads the next page when scrolled near the bottom", async () => {
     const firstPage = Array.from({ length: 50 }, (_, index) => createSession(index + 1));
@@ -215,7 +206,11 @@ describe("SessionSidebar", () => {
     );
 
     const link = await screen.findByRole("link", { name: /session 1/i });
-    simulateLongPress(link);
+    vi.useFakeTimers();
+    fireEvent.touchStart(link, { touches: [{ clientX: 20, clientY: 20 }] });
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_LONG_PRESS_MS);
+    });
 
     expect(screen.getByText("Rename")).toBeInTheDocument();
     expect(screen.getByText("Archive")).toBeInTheDocument();
