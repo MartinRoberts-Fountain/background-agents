@@ -247,7 +247,12 @@ describe("SessionSidebar", () => {
     );
 
     const link = await screen.findByRole("link", { name: /session 1/i });
-    simulateLongPress(link);
+    vi.useFakeTimers();
+    fireEvent.touchStart(link, { touches: [{ clientX: 20, clientY: 20 }] });
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_LONG_PRESS_MS);
+    });
+    vi.useRealTimers();
 
     fireEvent.click(screen.getByText("Archive"));
     fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
@@ -283,7 +288,12 @@ describe("SessionSidebar", () => {
     );
 
     const link = await screen.findByRole("link", { name: /session 1/i });
-    simulateLongPress(link);
+    vi.useFakeTimers();
+    fireEvent.touchStart(link, { touches: [{ clientX: 20, clientY: 20 }] });
+    act(() => {
+      vi.advanceTimersByTime(MOBILE_LONG_PRESS_MS);
+    });
+    vi.useRealTimers();
 
     fireEvent.click(screen.getByText("Archive"));
     fireEvent.click(await screen.findByRole("button", { name: "Archive" }));
