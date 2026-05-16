@@ -257,6 +257,29 @@ function statusFetchBodies(fetchMock: { mock: { calls: readonly (readonly unknow
     .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
 }
 
+function startingStatusBodies(fetchMock: { mock: { calls: readonly (readonly unknown[])[] } }) {
+  return statusFetchBodies(fetchMock).filter((body) => {
+    const loadingMessages = body.loading_messages;
+    return (
+      body.status === "Starting..." &&
+      Array.isArray(loadingMessages) &&
+      loadingMessages[0] === "Starting..."
+    );
+  });
+}
+
+function slackApiBodies(
+  fetchMock: { mock: { calls: readonly (readonly unknown[])[] } },
+  method: string
+) {
+  return fetchMock.mock.calls
+    .filter(([input]) => {
+      const url = typeof input === "string" ? input : String(input);
+      return url.includes(method);
+    })
+    .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
+}
+
 function promptFetchBodies(fetchMock: { mock: { calls: readonly (readonly unknown[])[] } }) {
   return fetchMock.mock.calls
     .filter(([input]) => {
@@ -315,7 +338,7 @@ describe("POST /events", () => {
 
     await flushWaitUntil(ctx);
     await flushWaitUntil(ctx, 1);
-    expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(4);
 
     expect(statusFetchBodies(slackFetch)).toContainEqual({
       channel_id: "C123",
@@ -323,8 +346,36 @@ describe("POST /events", () => {
       status: "Starting...",
       loading_messages: ["Starting..."],
     });
+    expect(startingStatusBodies(slackFetch)).toHaveLength(3);
     expect(order.indexOf("status")).toBeLessThan(order.indexOf("channelInfo"));
     expect(order.indexOf("status")).toBeLessThan(order.indexOf("session"));
+
+    const postBodies = slackApiBodies(slackFetch, "chat.postMessage");
+    expect(postBodies.some((body) => String(body.text).includes("Session started!"))).toBe(false);
+
+    const updateBodies = slackApiBodies(slackFetch, "chat.update");
+    expect(updateBodies).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          channel: "C123",
+          ts: "222.333",
+          text: "Working on *acme/app*...",
+          blocks: expect.arrayContaining([
+            expect.objectContaining({
+              type: "actions",
+              elements: expect.arrayContaining([
+                expect.objectContaining({
+                  type: "button",
+                  text: { type: "plain_text", text: "View Session" },
+                  url: "https://app.test/session/session-1",
+                  action_id: "view_session",
+                }),
+              ]),
+            }),
+          ]),
+        }),
+      ])
+    );
 
     slackFetch.mockRestore();
   });
@@ -357,6 +408,7 @@ describe("POST /events", () => {
       status: "Starting...",
       loading_messages: ["Starting..."],
     });
+    expect(startingStatusBodies(slackFetch)).toHaveLength(3);
     expect(order.indexOf("status")).toBeLessThan(order.indexOf("session"));
 
     slackFetch.mockRestore();
@@ -482,7 +534,7 @@ describe("POST /events", () => {
     expect(backgroundOutcome).toBe("complete");
     expect(order).toContain("session");
     expect(order).toContain("prompt");
-    expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(4);
 
     const statusPromise = ctx.waitUntil.mock.calls[1]?.[0] as Promise<void>;
     const statusOutcome = await Promise.race([
@@ -554,7 +606,7 @@ describe("POST /interactions", () => {
 
     await flushWaitUntil(ctx);
     await flushWaitUntil(ctx, 1);
-    expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(4);
 
     expect(statusFetchBodies(slackFetch)).toContainEqual({
       channel_id: "C123",
@@ -562,8 +614,34 @@ describe("POST /interactions", () => {
       status: "Starting...",
       loading_messages: ["Starting..."],
     });
+    expect(startingStatusBodies(slackFetch)).toHaveLength(3);
     expect(order.indexOf("repos")).toBeLessThan(order.indexOf("status"));
     expect(order.indexOf("status")).toBeLessThan(order.indexOf("session"));
+
+    const postBodies = slackApiBodies(slackFetch, "chat.postMessage");
+    expect(postBodies.some((body) => String(body.text).includes("Session started!"))).toBe(false);
+
+    const updateBodies = slackApiBodies(slackFetch, "chat.update");
+    expect(updateBodies).toEqual([
+      expect.objectContaining({
+        channel: "C123",
+        ts: "222.333",
+        text: "Working on *acme/app*...",
+        blocks: expect.arrayContaining([
+          expect.objectContaining({
+            type: "actions",
+            elements: expect.arrayContaining([
+              expect.objectContaining({
+                type: "button",
+                text: { type: "plain_text", text: "View Session" },
+                url: "https://app.test/session/session-1",
+                action_id: "view_session",
+              }),
+            ]),
+          }),
+        ]),
+      }),
+    ]);
 
     slackFetch.mockRestore();
   });
@@ -1036,7 +1114,7 @@ describe("POST /interactions", () => {
 
     await flushWaitUntil(ctx);
     await flushWaitUntil(ctx, 1);
-    expect(ctx.waitUntil).toHaveBeenCalledTimes(2);
+    expect(ctx.waitUntil).toHaveBeenCalledTimes(4);
 
     const sessionCall = (
       env.CONTROL_PLANE.fetch as unknown as { mock: { calls: unknown[][] } }
