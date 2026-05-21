@@ -263,6 +263,14 @@ export interface InactivityState {
   status: SandboxStatus;
   /** Number of connected client WebSockets */
   connectedClientCount: number;
+  /**
+   * Whether there is an active execution in progress.
+   * When true, inactivity checks are deferred — the execution timeout handles
+   * stuck runs. This prevents false inactivity timeouts during long-running
+   * executions where the agent delegates to child sessions and the parent
+   * session emits no tool/step events for extended periods.
+   */
+  isProcessing: boolean;
 }
 
 /**
@@ -337,6 +345,14 @@ export function evaluateInactivityTimeout(
 
   // Only check inactivity for ready or running sandboxes
   if (state.status !== "ready" && state.status !== "running") {
+    return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
+  }
+
+  // Defer inactivity check during active executions. The agent may delegate to
+  // child sessions for long stretches without emitting step/tool events to the
+  // control plane, which would otherwise look like inactivity. The execution
+  // timeout handles truly stuck runs.
+  if (state.isProcessing) {
     return { action: "schedule", nextCheckMs: config.minCheckIntervalMs };
   }
 

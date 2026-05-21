@@ -633,6 +633,7 @@ export class SessionDO extends DurableObject<Env> {
         this.repository.updateSandboxSnapshotImageId(sandboxId, imageId),
       updateSandboxLastActivity: (timestamp) =>
         this.repository.updateSandboxLastActivity(timestamp),
+      getIsProcessing: () => this.repository.getProcessingMessage() !== null,
       incrementCircuitBreakerFailure: (timestamp) =>
         this.repository.incrementCircuitBreakerFailure(timestamp),
       resetCircuitBreaker: () => this.repository.resetCircuitBreaker(),

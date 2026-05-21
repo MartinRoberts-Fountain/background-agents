@@ -453,6 +453,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: now - config.timeoutMs - 60000, // Well past timeout
       status: "stopped",
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -469,6 +470,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: now - config.timeoutMs - 60000,
       status: "failed",
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -482,6 +484,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: now - config.timeoutMs - 60000,
       status: "stale",
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -495,6 +498,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: null,
       status: "ready",
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -511,6 +515,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: now - config.timeoutMs - 1000, // Just past timeout
       status: "ready",
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -527,6 +532,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: now - config.timeoutMs - 1000,
       status: "ready",
       connectedClientCount: 2,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -545,6 +551,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: now - inactiveTime,
       status: "ready",
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -563,6 +570,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: now - inactiveTime,
       status: "ready",
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -580,6 +588,7 @@ describe("evaluateInactivityTimeout", () => {
       lastActivity: now - config.timeoutMs - 60000,
       status: "spawning", // Not ready or running
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
@@ -587,17 +596,35 @@ describe("evaluateInactivityTimeout", () => {
     expect(decision.action).toBe("schedule");
   });
 
-  it('returns "timeout" for running status', () => {
+  it('returns "timeout" for running status when not processing', () => {
     const now = Date.now();
     const state: InactivityState = {
       lastActivity: now - config.timeoutMs - 1000,
       status: "running",
       connectedClientCount: 0,
+      isProcessing: false,
     };
 
     const decision = evaluateInactivityTimeout(state, config, now);
 
     expect(decision.action).toBe("timeout");
+  });
+
+  it('returns "schedule" when isProcessing, even past inactivity threshold', () => {
+    const now = Date.now();
+    const state: InactivityState = {
+      lastActivity: now - config.timeoutMs - 60000, // Well past timeout
+      status: "ready",
+      connectedClientCount: 0,
+      isProcessing: true,
+    };
+
+    const decision = evaluateInactivityTimeout(state, config, now);
+
+    expect(decision.action).toBe("schedule");
+    if (decision.action === "schedule") {
+      expect(decision.nextCheckMs).toBe(config.minCheckIntervalMs);
+    }
   });
 
   it("uses default config values correctly", () => {
