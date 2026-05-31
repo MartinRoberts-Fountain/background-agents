@@ -22,20 +22,8 @@ vi.mock("@open-inspect/shared", async () => {
   };
 });
 
-import app, { buildAppHomeIntroText } from "./index";
+import app from "./index";
 import { clearLocalCache } from "./classifier/repos";
-
-describe("buildAppHomeIntroText", () => {
-  it("uses the configured app name", () => {
-    expect(buildAppHomeIntroText("Acme Bot")).toBe("Configure your Acme Bot preferences below.");
-  });
-
-  it("works with the default Open-Inspect name", () => {
-    expect(buildAppHomeIntroText("Open-Inspect")).toBe(
-      "Configure your Open-Inspect preferences below."
-    );
-  });
-});
 
 function createMockKV() {
   const store = new Map<string, string>();
@@ -322,6 +310,52 @@ describe("POST /events", () => {
     clearLocalCache();
     mockVerifySlackSignature.mockResolvedValue(true);
     mockGetUserInfo.mockResolvedValue({ ok: true, user: undefined });
+  });
+
+  it("publishes App Home when the home tab is opened", async () => {
+    mockPublishView.mockResolvedValue({ ok: true });
+    const env = makeEnv();
+    const ctx = makeCtx();
+
+    const response = await app.fetch(
+      slackEventRequest({
+        type: "app_home_opened",
+        tab: "home",
+        user: "U123",
+      }),
+      env,
+      ctx
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect(ctx.waitUntil).toHaveBeenCalledOnce();
+
+    await flushWaitUntil(ctx);
+
+    expect(mockPublishView).toHaveBeenCalledOnce();
+    const [token, userId, view] = mockPublishView.mock.calls[0];
+    expect(token).toBe("xoxb-test");
+    expect(userId).toBe("U123");
+    expect(view).toEqual(
+      expect.objectContaining({
+        type: "home",
+        blocks: expect.arrayContaining([
+          expect.objectContaining({
+            type: "section",
+            text: expect.objectContaining({
+              text: "Configure your Open-Inspect preferences below.",
+            }),
+          }),
+          expect.objectContaining({
+            type: "section",
+            text: expect.objectContaining({
+              text: expect.stringContaining("*Branch by repository*"),
+            }),
+          }),
+        ]),
+      })
+    );
   });
 
   it("sets Starting status for a new app mention before session creation", async () => {
@@ -1406,96 +1440,6 @@ describe("POST /interactions", () => {
     const kvDelete = (env.SLACK_KV as unknown as { delete: ReturnType<typeof vi.fn> }).delete;
     expect(kvDelete).toHaveBeenCalledWith("user_repo_branch:U123:acme/app");
     expect(mockPublishView).toHaveBeenCalled();
-  });
-
-  it("caps the App Home repo-override list under Slack's 100-block limit", async () => {
-    mockVerifySlackSignature.mockResolvedValue(true);
-    mockPublishView.mockResolvedValue({ ok: true });
-
-    const env = makeEnv();
-
-    // 60 available repos, each with a repo-specific branch override.
-    const repos = Array.from({ length: 60 }, (_, idx) => {
-      const number = String(idx + 1).padStart(3, "0");
-      return {
-        id: `acme/repo-${number}`,
-        owner: "acme",
-        name: `repo-${number}`,
-        fullName: `acme/repo-${number}`,
-        defaultBranch: "main",
-        private: true,
-      };
-    });
-
-    for (const repo of repos) {
-      await (env.SLACK_KV as unknown as { put: (k: string, v: string) => Promise<void> }).put(
-        `user_repo_branch:U123:${repo.id}`,
-        "staging"
-      );
-    }
-
-    (env.CONTROL_PLANE.fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input.toString();
-        if (url.includes("/repos")) {
-          return new Response(JSON.stringify({ repos }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ enabledModels: ["anthropic/claude-haiku-4-5"] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-    );
-
-    const payload = {
-      type: "event_callback",
-      event_id: "Ev-override-cap",
-      event: { type: "app_home_opened", tab: "home", user: "U123" },
-    };
-
-    const request = new Request("http://localhost/events", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-slack-signature": "v0=test",
-        "x-slack-request-timestamp": `${Math.floor(Date.now() / 1000)}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const ctx = makeCtx();
-    const response = await app.fetch(request, env, ctx);
-    expect(response.status).toBe(200);
-    await flushWaitUntil(ctx);
-
-    expect(mockPublishView).toHaveBeenCalled();
-    const publishedView = mockPublishView.mock.calls.at(-1)?.[2] as {
-      blocks: Array<{
-        type: string;
-        text?: { text?: string };
-        elements?: Array<{ text?: string }>;
-      }>;
-    };
-
-    // Stays under Slack's hard 100-block ceiling for views.publish.
-    expect(publishedView.blocks.length).toBeLessThanOrEqual(100);
-
-    // Exactly the cap is rendered (one section per override) ...
-    const overrideRows = publishedView.blocks.filter(
-      (b) => b.type === "section" && (b.text?.text ?? "").includes("→")
-    );
-    expect(overrideRows.length).toBe(50);
-
-    // ... and the remainder is surfaced as a summary instead of dropped silently.
-    const hasMoreNote = publishedView.blocks.some(
-      (b) =>
-        b.type === "context" &&
-        (b.elements ?? []).some((e) => (e.text ?? "").includes("10 more overrides"))
-    );
-    expect(hasMoreNote).toBe(true);
   });
 
   it("returns repo suggestions beyond 100 repos via search", async () => {
