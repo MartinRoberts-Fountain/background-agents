@@ -660,10 +660,22 @@ describe("IntegrationSettingsStore", () => {
     });
 
     it("round-trips global sandbox settings", async () => {
-      await store.setGlobal("sandbox", { defaults: { tunnelPorts: [3000, 3001] } });
+      await store.setGlobal("sandbox", {
+        defaults: {
+          tunnelPorts: [3000, 3001],
+          maxConcurrentChildSessions: 3,
+          maxTotalChildSessions: 8,
+        },
+      });
 
       const result = await store.getGlobal("sandbox");
-      expect(result).toEqual({ defaults: { tunnelPorts: [3000, 3001] } });
+      expect(result).toEqual({
+        defaults: {
+          tunnelPorts: [3000, 3001],
+          maxConcurrentChildSessions: 3,
+          maxTotalChildSessions: 8,
+        },
+      });
     });
 
     it("round-trips per-repo sandbox settings", async () => {
@@ -689,6 +701,19 @@ describe("IntegrationSettingsStore", () => {
       expect(config.settings.tunnelPorts).toEqual([3000, 3001]);
     });
 
+    it("getResolvedConfig merges child session limit overrides", async () => {
+      await store.setGlobal("sandbox", {
+        defaults: { maxConcurrentChildSessions: 5, maxTotalChildSessions: 15 },
+      });
+      await store.setRepoSettings("sandbox", "acme/app", { maxConcurrentChildSessions: 2 });
+
+      const config = await store.getResolvedConfig("sandbox", "acme/app");
+      expect(config.settings).toEqual({
+        maxConcurrentChildSessions: 2,
+        maxTotalChildSessions: 15,
+      });
+    });
+
     it("rejects non-array tunnelPorts", async () => {
       await expect(
         store.setGlobal("sandbox", {
@@ -709,6 +734,74 @@ describe("IntegrationSettingsStore", () => {
           defaults: { tunnelPorts: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] },
         })
       ).rejects.toThrow(IntegrationSettingsValidationError);
+    });
+
+    it("rejects invalid child session limits", async () => {
+      await expect(
+        store.setGlobal("sandbox", { defaults: { maxConcurrentChildSessions: 1.5 } })
+      ).rejects.toThrow(IntegrationSettingsValidationError);
+
+      await expect(
+        store.setGlobal("sandbox", { defaults: { maxTotalChildSessions: -1 } })
+      ).rejects.toThrow(IntegrationSettingsValidationError);
+    });
+
+    it("rejects concurrent child session limits greater than total limits", async () => {
+      await expect(
+        store.setGlobal("sandbox", {
+          defaults: { maxConcurrentChildSessions: 6, maxTotalChildSessions: 5 },
+        })
+      ).rejects.toThrow(IntegrationSettingsValidationError);
+    });
+
+    it("normalizes cross-field violations that only appear after merge", async () => {
+      // Each blob is individually valid — neither write throws — because the
+      // invariant (concurrent <= total) spans two fields set in different scopes.
+      // The violation only materializes in the merged result, so getResolvedConfig's
+      // normalize pass is the only thing that catches it. This pins that pass.
+      await store.setGlobal("sandbox", { defaults: { maxConcurrentChildSessions: 3 } });
+      await store.setRepoSettings("sandbox", "acme/app", { maxTotalChildSessions: 2 });
+
+      const config = await store.getResolvedConfig("sandbox", "acme/app");
+      // Merge would be { maxConcurrentChildSessions: 3, maxTotalChildSessions: 2 };
+      // the resolve-time normalize drops the inverted concurrent limit.
+      expect(config.settings).toEqual({ maxTotalChildSessions: 2 });
+    });
+
+    it("round-trips fractional cpuCores and small memoryMib", async () => {
+      await store.setRepoSettings("sandbox", "acme/app", { cpuCores: 0.5, memoryMib: 64 });
+
+      const result = await store.getRepoSettings("sandbox", "acme/app");
+      expect(result).toEqual({ cpuCores: 0.5, memoryMib: 64 });
+    });
+
+    it("preserves null repo resource overrides over inherited global defaults", async () => {
+      await store.setGlobal("sandbox", { defaults: { cpuCores: 2, memoryMib: 4096 } });
+      await store.setRepoSettings("sandbox", "acme/app", { cpuCores: null, memoryMib: null });
+
+      const repoSettings = await store.getRepoSettings("sandbox", "acme/app");
+      expect(repoSettings).toEqual({ cpuCores: null, memoryMib: null });
+
+      const resolved = await store.getResolvedConfig("sandbox", "acme/app");
+      expect(resolved.settings).toEqual({ cpuCores: null, memoryMib: null });
+    });
+
+    it("rejects non-positive cpuCores", async () => {
+      await expect(store.setGlobal("sandbox", { defaults: { cpuCores: 0 } })).rejects.toThrow(
+        IntegrationSettingsValidationError
+      );
+    });
+
+    it("rejects non-integer memoryMib", async () => {
+      await expect(store.setGlobal("sandbox", { defaults: { memoryMib: 256.5 } })).rejects.toThrow(
+        IntegrationSettingsValidationError
+      );
+    });
+
+    it("rejects non-positive memoryMib", async () => {
+      await expect(store.setGlobal("sandbox", { defaults: { memoryMib: 0 } })).rejects.toThrow(
+        IntegrationSettingsValidationError
+      );
     });
   });
 

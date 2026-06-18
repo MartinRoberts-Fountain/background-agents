@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import time
+from collections.abc import Iterable
 
 import httpx
 import modal
@@ -45,11 +46,59 @@ log = get_logger("image_builder")
 CALLBACK_MAX_RETRIES = 3
 CALLBACK_BACKOFF_BASE = 2  # seconds: 2, 4, 8
 
+# Build log errors are surfaced through callbacks; keep them concise.
+BUILD_FAILURE_MESSAGE_MAX_CHARS = 500
+
+_SETUP_FAILURE_EVENTS = {"setup.failed", "setup.timeout", "setup.error"}
+_SUPERVISOR_FAILURE_EVENTS = {"supervisor.error", "supervisor.fatal"}
+
 
 class BuildError(Exception):
     """Raised when a build sandbox fails."""
 
     pass
+
+
+def _format_build_failure_event(entry: dict, redact_values: Iterable[str] = ()) -> str | None:
+    """Return a concise build failure message from a structured log entry."""
+    event = entry.get("event")
+    if not isinstance(event, str):
+        return None
+    if event not in _SETUP_FAILURE_EVENTS | _SUPERVISOR_FAILURE_EVENTS:
+        return None
+
+    if event in {"setup.failed", "setup.timeout"}:
+        raw_message = entry.get("output_tail")
+    else:
+        raw_message = entry.get("error_message") or entry.get("error")
+
+    message = raw_message.strip() if isinstance(raw_message, str) else ""
+    for redact_value in sorted({value for value in redact_values if value}, key=len, reverse=True):
+        message = message.replace(redact_value, "***")
+
+    if event in {"setup.failed", "setup.timeout"}:
+        if not message and entry.get("exit_code") is not None:
+            message = f"exit_code={entry['exit_code']}"
+
+    if not message:
+        return event
+    return f"{event}: {message[-BUILD_FAILURE_MESSAGE_MAX_CHARS:]}"
+
+
+async def _terminate_build_sandbox(handle, build_id: str, reason: str) -> bool:
+    """Terminate a build sandbox, logging but not failing the build on cleanup errors."""
+    try:
+        await handle.modal_sandbox.terminate.aio()
+        log.info("build.sandbox_terminated", build_id=build_id, reason=reason)
+        return True
+    except Exception as e:
+        log.warn(
+            "build.sandbox_terminate_failed",
+            build_id=build_id,
+            reason=reason,
+            error=str(e),
+        )
+        return False
 
 
 def _outbound_secret() -> str:
@@ -139,37 +188,51 @@ def _generate_clone_token() -> str:
     return ""
 
 
-async def _stream_build_logs(sandbox) -> tuple[str, bool]:
+async def _stream_build_logs(
+    sandbox, redact_values: Iterable[str] = ()
+) -> tuple[str, bool, str | None]:
     """
     Stream sandbox stdout and extract build results.
 
     The entrypoint logs structured JSON lines. We look for:
     - event="git.sync_complete" with "head_sha" field
     - event="image_build.complete" to know the build finished
+    - setup/supervisor errors to preserve the actual build failure
 
     The sandbox stays alive after logging image_build.complete (it awaits
     shutdown_event), so we can snapshot_filesystem() while it's still running.
 
     Returns:
-        (head_sha, build_complete) tuple. head_sha is empty string if not found.
+        (head_sha, build_complete, error_message) tuple. head_sha is empty string if not found.
     """
     head_sha = ""
+    setup_error: str | None = None
+    supervisor_error: str | None = None
+    redact_values = tuple(redact_values)
     try:
         async for line in sandbox.stdout:
-            if "git.sync_complete" not in line and "image_build.complete" not in line:
-                continue
             try:
                 entry = json.loads(line)
-                event = entry.get("event", "")
+                if not isinstance(entry, dict):
+                    continue
+                event = entry.get("event")
+                if not isinstance(event, str):
+                    continue
                 if event == "git.sync_complete" and entry.get("head_sha"):
                     head_sha = entry["head_sha"]
                 elif event == "image_build.complete":
-                    return head_sha, True
+                    return head_sha, True, None
+
+                failure_message = _format_build_failure_event(entry, redact_values)
+                if failure_message and event in _SETUP_FAILURE_EVENTS and setup_error is None:
+                    setup_error = failure_message
+                elif failure_message and supervisor_error is None:
+                    supervisor_error = failure_message
             except json.JSONDecodeError:
                 continue
     except Exception as e:
         log.warn("build.stream_error", error=str(e))
-    return head_sha, False
+    return head_sha, False, setup_error or supervisor_error
 
 
 @app.function(
@@ -180,7 +243,7 @@ async def _stream_build_logs(sandbox) -> tuple[str, bool]:
 async def build_repo_image(
     repo_owner: str,
     repo_name: str,
-    default_branch: str = "main",
+    default_branch: str,
     callback_url: str = "",
     build_id: str = "",
     user_env_vars: dict[str, str] | None = None,
@@ -199,7 +262,7 @@ async def build_repo_image(
         build_id: Build identifier from the control plane
         user_env_vars: User-defined environment variables (repo secrets) injected into the build sandbox
     """
-    from ..sandbox.manager import SandboxManager
+    from ..sandbox.manager import SNAPSHOT_FILESYSTEM_TIMEOUT_SECONDS, SandboxManager
 
     # Validate callback URL against allowed hosts to prevent SSRF
     if callback_url and not validate_control_plane_url(callback_url):
@@ -208,6 +271,8 @@ async def build_repo_image(
 
     start_time = time.time()
     manager = SandboxManager()
+    handle = None
+    sandbox_terminated = False
 
     try:
         clone_token = _generate_clone_token()
@@ -230,17 +295,25 @@ async def build_repo_image(
         )
 
         # 3. Stream stdout until build completes (sandbox stays alive for snapshotting)
-        base_sha, build_complete = await _stream_build_logs(handle.modal_sandbox)
+        redact_values = (clone_token, *((user_env_vars or {}).values()))
+        base_sha, build_complete, build_error = await _stream_build_logs(
+            handle.modal_sandbox,
+            redact_values=redact_values,
+        )
         if not build_complete:
             exit_code = handle.modal_sandbox.returncode
+            if build_error:
+                raise BuildError(f"Build sandbox exited without completing: {build_error}")
             raise BuildError(f"Build sandbox exited without completing (exit_code={exit_code})")
 
         # 4. Snapshot the running sandbox's filesystem
-        image = await handle.modal_sandbox.snapshot_filesystem.aio()
+        image = await handle.modal_sandbox.snapshot_filesystem.aio(
+            timeout=SNAPSHOT_FILESYSTEM_TIMEOUT_SECONDS
+        )
         provider_image_id = image.object_id
 
         # 5. Terminate the sandbox (no longer needed after snapshot)
-        await handle.modal_sandbox.terminate.aio()
+        sandbox_terminated = await _terminate_build_sandbox(handle, build_id, "snapshot_complete")
 
         build_duration = time.time() - start_time
 
@@ -266,6 +339,9 @@ async def build_repo_image(
 
     except Exception as e:
         build_duration = time.time() - start_time
+        if handle is not None and not sandbox_terminated:
+            sandbox_terminated = await _terminate_build_sandbox(handle, build_id, "build_failed")
+
         log.error(
             "build.failed",
             build_id=build_id,
@@ -284,6 +360,9 @@ async def build_repo_image(
                     "error": str(e),
                 },
             )
+    finally:
+        if handle is not None and not sandbox_terminated:
+            await _terminate_build_sandbox(handle, build_id, "cleanup")
 
 
 # ---------------------------------------------------------------------------
@@ -339,11 +418,14 @@ async def _api_post(
 def _git_ls_remote_sha(
     repo_owner: str,
     repo_name: str,
-    branch: str,
+    ref: str,
     clone_token: str,
 ) -> str | None:
     """
-    Run git ls-remote to get the HEAD SHA for a branch.
+    Run git ls-remote to get the SHA a ref points to.
+
+    Pass "HEAD" to follow the remote's default branch, or "refs/heads/<name>"
+    for a specific branch.
 
     Returns the SHA string, or None on failure.
     """
@@ -354,7 +436,7 @@ def _git_ls_remote_sha(
 
     try:
         result = subprocess.run(
-            ["git", "ls-remote", url, f"refs/heads/{branch}"],
+            ["git", "ls-remote", url, ref],
             capture_output=True,
             text=True,
             timeout=30,
@@ -367,7 +449,7 @@ def _git_ls_remote_sha(
                 "scheduler.ls_remote_failed",
                 repo_owner=repo_owner,
                 repo_name=repo_name,
-                branch=branch,
+                ref=ref,
                 stderr=stderr,
             )
             return None
@@ -495,7 +577,11 @@ async def rebuild_repo_images():
             if not repo_owner or not repo_name:
                 continue
 
-            remote_sha = _git_ls_remote_sha(repo_owner, repo_name, "main", clone_token)
+            # Detect changes on the repo's default branch via HEAD: ls-remote
+            # resolves HEAD to the default branch tip, so the scheduler never
+            # needs the branch name. The build path resolves the name when it
+            # tags the image (see handleTriggerBuild in repo-images.ts).
+            remote_sha = _git_ls_remote_sha(repo_owner, repo_name, "HEAD", clone_token)
             if not remote_sha:
                 continue
 

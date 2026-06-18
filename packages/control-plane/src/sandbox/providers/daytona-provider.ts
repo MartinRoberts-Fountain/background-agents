@@ -10,6 +10,7 @@ import { createLogger } from "../../logger";
 import type { SourceControlProviderName } from "../../source-control";
 import type { DaytonaRestClient, DaytonaCreateSandboxParams } from "../daytona-rest-client";
 import { DaytonaApiError, DaytonaNotFoundError } from "../daytona-rest-client";
+import { buildSessionConfig } from "../sandbox-env";
 import {
   SandboxProviderError,
   type CreateSandboxConfig,
@@ -59,8 +60,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
 
   constructor(
     private readonly client: DaytonaRestClient,
-    private readonly providerConfig: DaytonaProviderConfig,
-    private readonly getCloneToken: () => Promise<string | null>
+    private readonly providerConfig: DaytonaProviderConfig
   ) {}
 
   // -----------------------------------------------------------------------
@@ -192,21 +192,10 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   // -----------------------------------------------------------------------
 
   private async buildEnvVars(config: CreateSandboxConfig): Promise<Record<string, string>> {
-    const cloneToken = await this.getCloneToken();
-
     // Start with user env vars (repo secrets), then overlay system vars
     const envVars: Record<string, string> = { ...(config.userEnvVars ?? {}) };
 
-    const sessionConfig: Record<string, string> = {
-      session_id: config.sessionId,
-      repo_owner: config.repoOwner,
-      repo_name: config.repoName,
-      provider: config.provider,
-      model: config.model,
-    };
-    if (config.branch) {
-      sessionConfig.branch = config.branch;
-    }
+    const sessionConfig = buildSessionConfig(config);
 
     Object.assign(envVars, {
       PYTHONUNBUFFERED: "1",
@@ -234,13 +223,11 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       envVars.VCS_CLONE_USERNAME = "x-access-token";
     }
 
-    if (cloneToken) {
-      envVars.VCS_CLONE_TOKEN = cloneToken;
-      if (this.providerConfig.scmProvider === "github") {
-        envVars.GITHUB_APP_TOKEN = cloneToken;
-        envVars.GITHUB_TOKEN = cloneToken;
-      }
-    }
+    // Note: no VCS_CLONE_TOKEN / GITHUB_TOKEN / GITHUB_APP_TOKEN. Git
+    // operations in the sandbox authenticate per-request via the system git
+    // credential helper, which hits /sessions/:id/scm-credentials. Embedding
+    // a token in env would silently fail once the token expires (or
+    // immediately, for providers like GitHub Apps with short-lived tokens).
 
     return envVars;
   }
@@ -362,8 +349,7 @@ function resolveTunnelPorts(rawPorts: number[] | undefined): number[] {
 
 export function createDaytonaProvider(
   client: DaytonaRestClient,
-  providerConfig: DaytonaProviderConfig,
-  getCloneToken: () => Promise<string | null>
+  providerConfig: DaytonaProviderConfig
 ): DaytonaSandboxProvider {
-  return new DaytonaSandboxProvider(client, providerConfig, getCloneToken);
+  return new DaytonaSandboxProvider(client, providerConfig);
 }

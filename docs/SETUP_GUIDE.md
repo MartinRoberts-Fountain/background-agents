@@ -4,11 +4,11 @@ This is the primary setup guide for users and contributors.
 
 It is organized by goal so you can pick the fastest path:
 
-| Path   | Best For                                                 | Time       |
-| ------ | -------------------------------------------------------- | ---------- |
-| Path A | Run the web app locally against an existing backend      | ~10-20 min |
-| Path B | Contribute code locally (lint/typecheck/tests)           | ~15-30 min |
-| Path C | Deploy your own full stack (Cloudflare + Modal + Vercel) | ~1-3 hours |
+| Path   | Best For                                            | Time       |
+| ------ | --------------------------------------------------- | ---------- |
+| Path A | Run the web app locally against an existing backend | ~10-20 min |
+| Path B | Contribute code locally (lint/typecheck/tests)      | ~15-30 min |
+| Path C | Deploy your own full stack                          | ~1-3 hours |
 
 ## Important Context
 
@@ -32,7 +32,7 @@ Optional (needed for `modal-infra` development):
 
 Optional (needed for full deployment):
 
-- Terraform `1.6+`
+- Terraform `1.9+`
 - Wrangler CLI
 
 Quick check:
@@ -60,7 +60,7 @@ What this does:
 
 ## Path A: Run the Web App Locally (Recommended Quick Start)
 
-Use this when you already have a deployed control plane and Modal backend, and only need local UI
+Use this when you already have a deployed control plane and sandbox backend, and only need local UI
 development.
 
 ### 1. Create local env file
@@ -78,6 +78,14 @@ Edit `packages/web/.env.local`:
 GITHUB_CLIENT_ID=your_github_app_client_id
 GITHUB_CLIENT_SECRET=your_github_app_client_secret
 
+# Google OAuth (optional — enables "Sign in with Google"). Create a Web OAuth
+# client at https://console.cloud.google.com/apis/credentials with redirect URI
+# http://localhost:3000/api/auth/callback/google. Set NEXT_PUBLIC_GOOGLE_ENABLED=true
+# to reveal the button (inlined at build time — restart the dev server after changing).
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+NEXT_PUBLIC_GOOGLE_ENABLED=
+
 # NextAuth
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=your_generated_secret
@@ -89,18 +97,18 @@ NEXT_PUBLIC_WS_URL=wss://open-inspect-control-plane-<name>.<subdomain>.workers.d
 # Must match control-plane INTERNAL_CALLBACK_SECRET
 INTERNAL_CALLBACK_SECRET=your_shared_secret
 
-# Optional access control
+# Optional access control (a user is admitted if they match ANY allowlist)
 ALLOWED_USERS=
 ALLOWED_EMAIL_DOMAINS=
+# Exact emails (any provider's verified email) — for users on shared domains
+ALLOWED_EMAILS=
 
 # Optional whitelabel branding (defaults shown). NEXT_PUBLIC_* vars are
 # inlined into the client bundle at build time — restart `npm run dev`
 # after changing them.
 NEXT_PUBLIC_APP_NAME=Open-Inspect
-# Short label for the sidebar header (next to the logo). Defaults to
-# "Inspect" when unset; falls through to NEXT_PUBLIC_APP_NAME when only
-# the long name is overridden.
-NEXT_PUBLIC_APP_SHORT_NAME=
+# Short label for the sidebar header.
+NEXT_PUBLIC_APP_SHORT_NAME=Inspect
 NEXT_PUBLIC_APP_ICON_URL=
 ```
 
@@ -122,6 +130,10 @@ In GitHub App settings, include:
 `http://localhost:3000/api/auth/callback/github`
 
 If this does not match exactly, sign-in will fail.
+
+If you enabled Google login, also add this redirect URI to your Google OAuth client:
+
+`http://localhost:3000/api/auth/callback/google`
 
 ### 4. Run the app
 
@@ -204,7 +216,7 @@ Critical notes before deploy:
 - Build workers before running Terraform apply.
 - Build `@open-inspect/shared` first.
 - Use two-phase Terraform deploy for DO/service bindings.
-- Deploy Modal with `modal deploy deploy.py` (not `src/app.py`).
+- For Modal deployments, deploy with `modal deploy deploy.py` (not `src/app.py`).
 
 ## Common Issues and Fixes
 
@@ -226,12 +238,16 @@ For deployed control plane use `wss://...`, for local control plane use `ws://..
 
 ### Prompts queue but no sandbox work happens
 
-Control plane cannot reach Modal (or Modal is not properly configured/deployed).
+The control plane cannot reach the configured sandbox backend, or that backend is not properly
+configured/deployed.
 
 ## Related Docs
 
 - Architecture and internals: [docs/HOW_IT_WORKS.md](./HOW_IT_WORKS.md)
 - Full production deployment: [docs/GETTING_STARTED.md](./GETTING_STARTED.md)
+- GitHub integration usage: [docs/integrations/GITHUB.md](./integrations/GITHUB.md)
+- Linear integration usage: [docs/integrations/LINEAR.md](./integrations/LINEAR.md)
 - Debugging and observability: [docs/DEBUGGING_PLAYBOOK.md](./DEBUGGING_PLAYBOOK.md)
+- Available models: [docs/AVAILABLE_MODELS.md](./AVAILABLE_MODELS.md)
 - OpenAI model setup: [docs/OPENAI_MODELS.md](./OPENAI_MODELS.md)
 - Contribution workflow: [CONTRIBUTING.md](../CONTRIBUTING.md)

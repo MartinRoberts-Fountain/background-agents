@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ServerMessage, SessionArtifact, SessionState } from "@open-inspect/shared";
 import type * as SwrModule from "swr";
+import { isUnarchivedSessionListKey } from "@/lib/session-list";
 import { useSessionSocket } from "./use-session-socket";
+
+type SubscribedMessage = Extract<ServerMessage, { type: "subscribed" }>;
 
 const { mutateMock } = vi.hoisted(() => ({
   mutateMock: vi.fn(),
@@ -74,7 +77,7 @@ function createSessionState(overrides: Partial<SessionState> = {}): SessionState
   };
 }
 
-function createSubscribedMessage(artifacts: SessionArtifact[] = []): ServerMessage {
+function createSubscribedMessage(artifacts: SessionArtifact[] = []): SubscribedMessage {
   return {
     type: "subscribed",
     sessionId: "session-1",
@@ -92,6 +95,18 @@ function createSubscribedMessage(artifacts: SessionArtifact[] = []): ServerMessa
     },
     spawnError: null,
   };
+}
+
+function sendSandboxAccessMessages(socket: FakeWebSocket, sandboxId: string) {
+  socket.receive({
+    type: "code_server_info",
+    url: `https://code.example/${sandboxId}`,
+    password: "secret",
+  });
+  socket.receive({
+    type: "sandbox_dashboard_url",
+    url: `https://provider.example/${sandboxId}`,
+  });
 }
 
 describe("useSessionSocket", () => {
@@ -220,7 +235,79 @@ describe("useSessionSocket", () => {
     });
   });
 
-  it("drops invalid numeric screenshot metadata from subscribed artifacts", async () => {
+  it("revalidates the sidebar session list on title updates", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+      socket.receive(createSubscribedMessage());
+      socket.receive({ type: "session_title", title: "Generated title" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.title).toBe("Generated title");
+    });
+
+    expect(mutateMock).toHaveBeenCalledWith(isUnarchivedSessionListKey);
+  });
+
+  it("hydrates replayed assistant text before completion when storage ordering is tied", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    const subscribed = createSubscribedMessage();
+    subscribed.replay = {
+      events: [
+        {
+          type: "execution_complete",
+          messageId: "msg-1",
+          success: true,
+          sandboxId: "sb-1",
+          timestamp: 2,
+        },
+        {
+          type: "token",
+          content: "Final response",
+          messageId: "msg-1",
+          sandboxId: "sb-1",
+          timestamp: 1,
+        },
+      ],
+      hasMore: false,
+      cursor: null,
+    };
+
+    act(() => {
+      socket.open();
+      socket.receive(subscribed);
+    });
+
+    await waitFor(() => {
+      expect(result.current.events).toEqual([
+        expect.objectContaining({
+          type: "token",
+          content: "Final response",
+          messageId: "msg-1",
+        }),
+        expect.objectContaining({
+          type: "execution_complete",
+          messageId: "msg-1",
+          success: true,
+        }),
+      ]);
+    });
+  });
+
+  it("hydrates video metadata from subscribed artifacts", async () => {
     const { result } = renderHook(() => useSessionSocket("session-1"));
 
     await waitFor(() => {
@@ -236,14 +323,22 @@ describe("useSessionSocket", () => {
       socket.receive(
         createSubscribedMessage([
           {
-            id: "artifact-shot-invalid",
-            type: "screenshot",
-            url: "sessions/session-1/media/artifact-shot-invalid.png",
+            id: "artifact-video-1",
+            type: "video",
+            url: "sessions/session-1/media/artifact-video-1.mp4",
             metadata: {
-              objectKey: "sessions/session-1/media/artifact-shot-invalid.png",
-              mimeType: "image/png",
-              sizeBytes: -1,
-              viewport: { width: 0, height: -100 },
+              objectKey: "sessions/session-1/media/artifact-video-1.mp4",
+              mimeType: "video/mp4",
+              sizeBytes: 4096,
+              caption: "Menu interaction",
+              sourceUrl: "http://127.0.0.1:3000/start",
+              endUrl: "http://127.0.0.1:3000/end",
+              durationMs: 1450,
+              recordingStartedAt: 1000,
+              recordingEndedAt: 2450,
+              dimensions: { width: 1280, height: 720 },
+              truncated: false,
+              hasAudio: false,
             },
             createdAt: 1234,
           },
@@ -254,11 +349,68 @@ describe("useSessionSocket", () => {
     await waitFor(() => {
       expect(result.current.artifacts).toEqual([
         {
-          id: "artifact-shot-invalid",
-          type: "screenshot",
-          url: "sessions/session-1/media/artifact-shot-invalid.png",
+          id: "artifact-video-1",
+          type: "video",
+          url: "sessions/session-1/media/artifact-video-1.mp4",
           metadata: expect.objectContaining({
-            objectKey: "sessions/session-1/media/artifact-shot-invalid.png",
+            objectKey: "sessions/session-1/media/artifact-video-1.mp4",
+            mimeType: "video/mp4",
+            sizeBytes: 4096,
+            caption: "Menu interaction",
+            sourceUrl: "http://127.0.0.1:3000/start",
+            endUrl: "http://127.0.0.1:3000/end",
+            durationMs: 1450,
+            recordingStartedAt: 1000,
+            recordingEndedAt: 2450,
+            dimensions: { width: 1280, height: 720 },
+            truncated: false,
+            hasAudio: false,
+          }),
+          createdAt: 1234,
+        },
+      ]);
+    });
+  });
+
+  it("drops wrong-type metadata fields during narrowing", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+    });
+
+    act(() => {
+      socket.receive(
+        createSubscribedMessage([
+          {
+            id: "artifact-shot-wrong-types",
+            type: "screenshot",
+            url: "sessions/session-1/media/artifact-shot-wrong-types.png",
+            metadata: {
+              objectKey: "sessions/session-1/media/artifact-shot-wrong-types.png",
+              mimeType: "image/png",
+              sizeBytes: "five",
+              viewport: "not-an-object",
+            },
+            createdAt: 1234,
+          },
+        ])
+      );
+    });
+
+    await waitFor(() => {
+      expect(result.current.artifacts).toEqual([
+        {
+          id: "artifact-shot-wrong-types",
+          type: "screenshot",
+          url: "sessions/session-1/media/artifact-shot-wrong-types.png",
+          metadata: expect.objectContaining({
+            objectKey: "sessions/session-1/media/artifact-shot-wrong-types.png",
             mimeType: "image/png",
             sizeBytes: undefined,
             viewport: undefined,
@@ -326,6 +478,145 @@ describe("useSessionSocket", () => {
       expect(result.current.sessionState?.branchName).toBe("feature/live-update");
     });
     expect(mutateMock).not.toHaveBeenCalled();
+  });
+
+  it("updates sessionState.sandboxDashboardUrl from sandbox_dashboard_url", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+      socket.receive(createSubscribedMessage());
+    });
+
+    act(() => {
+      socket.receive({
+        type: "sandbox_dashboard_url",
+        url: "https://provider.example/sandbox-123",
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
+        "https://provider.example/sandbox-123"
+      );
+    });
+  });
+
+  it("clears credentials on spawn and terminal statuses without dropping diagnostic links early", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+      socket.receive(createSubscribedMessage());
+      sendSandboxAccessMessages(socket, "old-sandbox");
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
+        "https://provider.example/old-sandbox"
+      );
+      expect(result.current.sessionState?.codeServerUrl).toBe("https://code.example/old-sandbox");
+    });
+
+    act(() => {
+      socket.receive({ type: "sandbox_spawning" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxStatus).toBe("spawning");
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
+        "https://provider.example/old-sandbox"
+      );
+      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
+    });
+
+    act(() => {
+      socket.receive({ type: "sandbox_status", status: "spawning" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxStatus).toBe("spawning");
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBeUndefined();
+      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
+    });
+
+    act(() => {
+      sendSandboxAccessMessages(socket, "new-sandbox");
+      socket.receive({ type: "sandbox_status", status: "failed" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxStatus).toBe("failed");
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
+        "https://provider.example/new-sandbox"
+      );
+      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
+    });
+  });
+
+  it("clears dashboard URL only for replacement starts, not sandbox errors", async () => {
+    const { result } = renderHook(() => useSessionSocket("session-1"));
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances).toHaveLength(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    act(() => {
+      socket.open();
+      socket.receive(createSubscribedMessage());
+      sendSandboxAccessMessages(socket, "old-sandbox");
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
+        "https://provider.example/old-sandbox"
+      );
+      expect(result.current.sessionState?.codeServerUrl).toBe("https://code.example/old-sandbox");
+    });
+
+    act(() => {
+      socket.receive({ type: "sandbox_status", status: "spawning" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxStatus).toBe("spawning");
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBeUndefined();
+      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
+    });
+
+    act(() => {
+      sendSandboxAccessMessages(socket, "new-sandbox");
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
+        "https://provider.example/new-sandbox"
+      );
+      expect(result.current.sessionState?.codeServerUrl).toBe("https://code.example/new-sandbox");
+    });
+
+    act(() => {
+      socket.receive({ type: "sandbox_error", error: "spawn failed" });
+    });
+
+    await waitFor(() => {
+      expect(result.current.sessionState?.sandboxStatus).toBe("failed");
+      expect(result.current.sessionState?.sandboxDashboardUrl).toBe(
+        "https://provider.example/new-sandbox"
+      );
+      expect(result.current.sessionState?.codeServerUrl).toBeUndefined();
+    });
   });
 
   it("prepends new artifacts and replaces duplicates by id", async () => {

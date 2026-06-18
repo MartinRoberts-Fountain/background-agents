@@ -24,23 +24,27 @@ Open-Inspect provides a hosted background coding agent that can:
 
 ### How It Works
 
-The system uses a shared GitHub App installation for all git operations (clone, push). This means:
+The system uses a shared GitHub App installation for git operations (clone, fetch, push). The
+control plane mints short-lived installation tokens server-side and brokers them to sandboxes
+through the git credential helper on demand. This means:
 
 - **All users share the same GitHub App credentials** - The GitHub App must be installed on your
   organization's repositories, and any user of the system can access any repo the App has access to
 - **No per-user repository access validation** - The system does not verify that a user has
   permission to access a specific repository before creating a session
-- **User OAuth tokens are used for PR creation** - PRs are created using the user's GitHub OAuth
-  token, ensuring proper attribution and that users can only create PRs on repos they have write
-  access to
+- **GitHub users' OAuth tokens are used for PR creation** - For GitHub logins, PRs are created using
+  the user's GitHub OAuth token, ensuring proper attribution and that they can only create PRs on
+  repos they have write access to. Users who sign in another way (e.g. Google) carry no SCM token,
+  so their PRs fall back to the shared GitHub App bot
 
 ### Token Architecture
 
-| Token Type       | Purpose                | Scope                            |
-| ---------------- | ---------------------- | -------------------------------- |
-| GitHub App Token | Clone repos, push code | All repos where App is installed |
-| User OAuth Token | Create PRs, user info  | Repos user has access to         |
-| WebSocket Token  | Real-time session auth | Single session                   |
+| Token Type         | Purpose                                | Scope                            |
+| ------------------ | -------------------------------------- | -------------------------------- |
+| GitHub App Token   | Brokered git clone/fetch/push auth     | All repos where App is installed |
+| User OAuth Token   | Create PRs, user info                  | Repos user has access to         |
+| Sandbox Auth Token | Sandbox-to-control-plane session calls | Single session                   |
+| WebSocket Token    | Real-time session auth                 | Single session                   |
 
 ### Why Single-Tenant Only
 
@@ -92,7 +96,7 @@ built for internal use where all employees are trusted and have access to compan
                                  │
                                  ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│                      Data Plane (Modal)                            │
+│                 Data Plane (Sandbox Backend)                       │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │                     Session Sandbox                          │  │
 │  │  ┌───────────┐  ┌───────────┐  ┌───────────┐                 │  │
@@ -107,15 +111,17 @@ built for internal use where all employees are trusted and have access to compan
 
 ## Packages
 
-| Package                                 | Description                                 |
-| --------------------------------------- | ------------------------------------------- |
-| [modal-infra](packages/modal-infra)     | Modal sandbox infrastructure                |
-| [control-plane](packages/control-plane) | Cloudflare Workers + Durable Objects        |
-| [web](packages/web)                     | Next.js web client                          |
-| [slack-bot](packages/slack-bot)         | Slack integration (sessions from messages)  |
-| [github-bot](packages/github-bot)       | GitHub integration (auto-review, @mention)  |
-| [linear-bot](packages/linear-bot)       | Linear integration (issue → coding session) |
-| [shared](packages/shared)               | Shared types and utilities                  |
+| Package                                     | Description                                 |
+| ------------------------------------------- | ------------------------------------------- |
+| [control-plane](packages/control-plane)     | Cloudflare Workers + Durable Objects        |
+| [web](packages/web)                         | Next.js web client                          |
+| [sandbox-runtime](packages/sandbox-runtime) | Shared in-sandbox agent runtime             |
+| [modal-infra](packages/modal-infra)         | Modal sandbox infrastructure                |
+| [daytona-infra](packages/daytona-infra)     | Daytona snapshot infrastructure             |
+| [slack-bot](packages/slack-bot)             | Slack integration (sessions from messages)  |
+| [github-bot](packages/github-bot)           | GitHub integration (auto-review, @mention)  |
+| [linear-bot](packages/linear-bot)           | Linear integration (issue → coding session) |
+| [shared](packages/shared)                   | Shared types and utilities                  |
 
 ## Getting Started
 
@@ -166,14 +172,15 @@ await configureGitIdentity({
 
 Choose the AI model that fits your task, with per-session reasoning effort controls:
 
-| Provider     | Models                                                      |
-| ------------ | ----------------------------------------------------------- |
-| Anthropic    | Claude Haiku 4.5, Sonnet 4.5/4.6, Opus 4.5/4.6              |
-| OpenAI       | GPT 5.2, GPT 5.4, GPT 5.2 Codex, 5.3 Codex, 5.3 Codex Spark |
-| OpenCode Zen | Kimi K2.5, MiniMax M2.5, GLM 5 (opt-in)                     |
+| Provider     | Models                                                               |
+| ------------ | -------------------------------------------------------------------- |
+| Anthropic    | Claude Haiku 4.5, Sonnet 4.5/4.6, Opus 4.5/4.6/4.7/4.8, Fable 5      |
+| OpenAI       | GPT 5.2, GPT 5.4, GPT 5.5, GPT 5.2 Codex, 5.3 Codex, 5.3 Codex Spark |
+| OpenCode Zen | Kimi K2.5/K2.6, MiniMax M2.5, Qwen3.7 Max, GLM 5/5.1 (opt-in)        |
 
 OpenAI models work with your existing ChatGPT subscription via OAuth — no separate API key needed.
-See **[docs/OPENAI_MODELS.md](docs/OPENAI_MODELS.md)** for setup instructions.
+See **[docs/AVAILABLE_MODELS.md](docs/AVAILABLE_MODELS.md)** for the full model list and
+**[docs/OPENAI_MODELS.md](docs/OPENAI_MODELS.md)** for OpenAI setup instructions.
 
 ### Client Integrations
 
@@ -182,11 +189,11 @@ Interact with agents from wherever your team already works:
 - **Web UI** — Full session management with real-time streaming, model/reasoning selectors, terminal
   panel, and multiplayer presence
 - **Slack Bot** — @mention or DM to start a session; replies thread back with results. Per-user
-  model and branch preferences via App Home
-- **GitHub Bot** — Auto-review on PR open, respond to @mentions in PR comments, or trigger on
-  reviewer assignment. Configurable per-repo
-- **Linear Bot** — Assign an issue to the agent and it creates a coding session, posts progress
-  activities, and links the resulting PR
+  model and branch preferences via App Home. See [Slack integration](docs/integrations/SLACK.md)
+- **GitHub Bot** — Auto-review on PR open or respond to @mentions in PR comments. Configurable
+  per-repo. See [GitHub integration](docs/integrations/GITHUB.md)
+- **Linear Bot** — Mention or assign the agent on an issue to start a coding session, post progress
+  activities, and link the resulting PR. See [Linear integration](docs/integrations/LINEAR.md)
 - **Webhooks** — Trigger sessions from any external system via authenticated HTTP POST
 
 ### Automations
@@ -202,14 +209,16 @@ See **[docs/AUTOMATIONS.md](docs/AUTOMATIONS.md)** for setup instructions.
 
 ### Sandbox Environment
 
-Every session runs in an isolated Modal sandbox with a full development environment:
+Every session runs in an isolated sandbox backend with a full development environment:
 
 - **Pre-installed:** Node.js 22, Python 3.12, Bun, git, GitHub CLI, build-essential
 - **Browser automation:** agent-browser CLI with headless Chromium for screenshots, visual diffs,
   and UI verification
 - **Code-server:** Optional browser-based VS Code connected to the session workspace
 - **Web terminal:** ttyd-powered terminal accessible from the session UI
-- **Port tunneling:** Expose up to 10 dev server ports via encrypted tunnels
+- **Port tunneling:** Expose up to 10 dev server ports via encrypted tunnels. URLs are available
+  in-sandbox at `/workspace/.tunnels.env` before `.openinspect/start.sh` runs
+  ([details](docs/HOW_IT_WORKS.md#tunnel-urls-inside-the-sandbox))
 - **Repo secrets:** AES-256-GCM encrypted, scoped per-repo or globally, injected as env vars at
   spawn time. Supports bulk `.env` paste import
 
@@ -248,6 +257,8 @@ docker compose up -d postgres redis
   - `SETUP_TIMEOUT_SECONDS` (default `300`)
   - `START_TIMEOUT_SECONDS` (default `120`)
 - Both hooks receive `OPENINSPECT_BOOT_MODE` (`build`, `fresh`, `repo_image`, `snapshot_restore`)
+- Git operations in hooks can authenticate to other private repos on the configured SCM host when
+  the shared installation has access
 
 ## License
 
@@ -259,6 +270,8 @@ Inspired by [Ramp's Inspect](https://builders.ramp.com/post/why-we-built-our-bac
 built with:
 
 - [Modal](https://modal.com) - Cloud sandbox infrastructure
+- [Daytona](https://www.daytona.io) - Cloud development sandboxes
+- [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) - Cloud sandbox infrastructure
 - [Cloudflare Workers](https://workers.cloudflare.com) - Edge computing
 - [OpenCode](https://opencode.ai) - Coding agent runtime
 - [Next.js](https://nextjs.org) - Web framework

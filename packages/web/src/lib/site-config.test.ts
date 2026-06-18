@@ -58,7 +58,14 @@ describe("site-config", () => {
     expect(APP_SHORT_NAME).toBe("Inspect");
   });
 
-  it("APP_SHORT_NAME falls through to APP_NAME when only NEXT_PUBLIC_APP_NAME is set", async () => {
+  it("APP_SHORT_NAME defaults to 'Inspect' when NEXT_PUBLIC_APP_NAME is the built-in default", async () => {
+    process.env.NEXT_PUBLIC_APP_NAME = "Open-Inspect";
+    delete process.env.NEXT_PUBLIC_APP_SHORT_NAME;
+    const { APP_SHORT_NAME } = await import("./site-config");
+    expect(APP_SHORT_NAME).toBe("Inspect");
+  });
+
+  it("APP_SHORT_NAME falls through to custom APP_NAME when only NEXT_PUBLIC_APP_NAME is set", async () => {
     process.env.NEXT_PUBLIC_APP_NAME = "Acme Bot";
     delete process.env.NEXT_PUBLIC_APP_SHORT_NAME;
     const { APP_SHORT_NAME } = await import("./site-config");
@@ -78,9 +85,27 @@ describe("site-config", () => {
     expect(APP_ICON_URL).toBe("");
   });
 
+  it("APP_ICON_URL is empty when NEXT_PUBLIC_APP_ICON_URL is empty", async () => {
+    process.env.NEXT_PUBLIC_APP_ICON_URL = "   ";
+    const { APP_ICON_URL } = await import("./site-config");
+    expect(APP_ICON_URL).toBe("");
+  });
+
   it("APP_ICON_URL reflects NEXT_PUBLIC_APP_ICON_URL", async () => {
     process.env.NEXT_PUBLIC_APP_ICON_URL = "/branding/logo.svg";
     const { APP_ICON_URL } = await import("./site-config");
     expect(APP_ICON_URL).toBe("/branding/logo.svg");
+  });
+
+  it("APP_FAVICON_URL defaults to the built-in logo when NEXT_PUBLIC_APP_ICON_URL is unset", async () => {
+    delete process.env.NEXT_PUBLIC_APP_ICON_URL;
+    const { APP_FAVICON_URL } = await import("./site-config");
+    expect(APP_FAVICON_URL).toBe("/favicon.ico");
+  });
+
+  it("APP_FAVICON_URL uses NEXT_PUBLIC_APP_ICON_URL when set", async () => {
+    process.env.NEXT_PUBLIC_APP_ICON_URL = "/branding/acme-logo.svg";
+    const { APP_FAVICON_URL } = await import("./site-config");
+    expect(APP_FAVICON_URL).toBe("/branding/acme-logo.svg");
   });
 });

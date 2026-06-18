@@ -25,7 +25,7 @@ export type SandboxStatus =
 export type GitSyncStatus = "pending" | "in_progress" | "completed" | "failed";
 export type MessageStatus = "pending" | "processing" | "completed" | "failed";
 export type MessageSource = "web" | "slack" | "linear" | "extension" | "github" | "automation";
-export type ArtifactType = "pr" | "screenshot" | "preview" | "branch";
+export type ArtifactType = "pr" | "screenshot" | "video" | "preview" | "branch";
 export type EventType =
   | "heartbeat"
   | "token"
@@ -150,6 +150,40 @@ export interface ScreenshotArtifactMetadata {
   caption?: string;
 }
 
+/** Metadata stored on video recording artifacts. */
+export interface VideoArtifactMetadata {
+  /** R2 object key */
+  objectKey: string;
+  /** MIME type for saved recordings. */
+  mimeType: "video/mp4";
+  /** File size in bytes */
+  sizeBytes: number;
+  /** Agent-provided title or description of the validation recording */
+  caption: string;
+  /** Recording duration in milliseconds */
+  durationMs: number;
+  /** Artifact creation time as epoch milliseconds */
+  createdAt: number;
+  /** Recording start time as epoch milliseconds */
+  recordingStartedAt: number;
+  /** Recording end time as epoch milliseconds */
+  recordingEndedAt: number;
+  /** Captured viewport dimensions */
+  dimensions: { width: number; height: number };
+  /** Whether recording stopped at the maximum duration */
+  truncated: boolean;
+  /** Recordings must not include audio */
+  hasAudio?: false;
+  /** Captured surface for v1 */
+  captureSurface?: "browser";
+  /** Artifact source */
+  source?: "agent";
+  /** URL at recording start */
+  sourceUrl?: string;
+  /** URL when recording stopped */
+  endUrl?: string;
+}
+
 // Pull request info
 export interface PullRequest {
   number: number;
@@ -256,6 +290,12 @@ export type SandboxEvent =
       timestamp: number;
     }
   | {
+      type: "session_title";
+      title: string;
+      sandboxId: string;
+      timestamp: number;
+    }
+  | {
       type: "user_message";
       content: string;
       messageId: string;
@@ -332,6 +372,7 @@ export type ServerMessage =
   | { type: "code_server_info"; url: string; password: string }
   | { type: "ttyd_info"; url: string; token: string }
   | { type: "tunnel_urls"; urls: Record<string, string> }
+  | { type: "sandbox_dashboard_url"; url: string }
   | { type: "error"; code: string; message: string };
 
 // Session state sent to clients
@@ -356,6 +397,7 @@ export interface SessionState {
   tunnelUrls?: Record<string, string> | null;
   ttydUrl?: string | null;
   ttydToken?: string | null;
+  sandboxDashboardUrl?: string | null;
 }
 
 // Participant presence info
@@ -377,6 +419,7 @@ export interface InstallationRepository {
   description: string | null;
   private: boolean;
   defaultBranch: string;
+  archived: boolean;
   language?: string | null;
   topics?: string[];
 }
@@ -577,6 +620,20 @@ export interface SpawnContext {
 }
 
 /** Returned by child DO's GET /internal/child-summary */
+export interface ChildSessionFinalResponse extends AgentResponse {
+  messageId: string;
+  completedAt: number | null;
+  eventCount: number;
+  eventLimitReached: boolean;
+}
+
+export interface ChildSessionTrajectory {
+  events: EventResponse[];
+  hasMore: boolean;
+  cursor?: string;
+  limit: number;
+}
+
 export interface ChildSessionDetail {
   session: {
     id: string;
@@ -592,6 +649,8 @@ export interface ChildSessionDetail {
   sandbox: { status: SandboxStatus } | null;
   artifacts: Array<{ type: string; url: string; metadata: unknown }>;
   recentEvents: Array<{ type: string; data: unknown; createdAt: number }>;
+  finalResponse?: ChildSessionFinalResponse | null;
+  trajectory?: ChildSessionTrajectory;
 }
 
 // ─── Analytics ───────────────────────────────────────────────────────────────

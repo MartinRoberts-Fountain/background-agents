@@ -18,12 +18,17 @@ import {
   type TriggerConfig,
 } from "@open-inspect/shared";
 import { AutomationStore, toAutomationRun, type AutomationRow } from "../db/automation-store";
-import { SessionIndexStore } from "../db/session-index";
 import { UserStore } from "../db/user-store";
+import { createRequestMetrics } from "../db/instrumented-d1";
 import { generateId } from "../auth/crypto";
 import { createLogger, parseLogLevel } from "../logger";
 import type { Logger } from "../logger";
 import type { Env } from "../types";
+import { initializeSession } from "../session/initialize";
+import {
+  resolveCodeServerEnabled,
+  resolveSandboxSettings,
+} from "../session/integration-settings-resolution";
 
 /** Max automations to process per tick (backpressure). */
 const MAX_PER_TICK = 25;
@@ -542,38 +547,14 @@ export class SchedulerDO extends DurableObject<Env> {
     runId: string
   ): Promise<{ sessionId: string }> {
     const sessionId = generateId();
-    const doId = this.env.SESSION.idFromName(sessionId);
-    const stub = this.env.SESSION.get(doId);
-
-    // Initialize the session DO
-    const initResponse = await stub.fetch("http://internal/internal/init", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionName: sessionId,
-        repoOwner: automation.repo_owner,
-        repoName: automation.repo_name,
-        repoId: automation.repo_id,
-        defaultBranch: automation.base_branch,
-        model: automation.model,
-        reasoningEffort: automation.reasoning_effort,
-        title: `[Auto] ${automation.name}`,
-        userId: automation.created_by,
-        spawnSource: "automation",
-      }),
-    });
-
-    if (!initResponse.ok) {
-      throw new Error(`Session init failed with status ${initResponse.status}`);
-    }
 
     // Resolve the canonical user_id for the session index.
-    // New automations (post-Phase 5) have user_id populated at creation time, so this
-    // lookup is skipped. Legacy automations have user_id = NULL but store the GitHub
-    // numeric user ID in created_by (set from NextAuth session.user.id in the web UI,
-    // which is the only automation creation path). We look up that GitHub ID in
-    // user_identities to find the canonical user. This fallback becomes dead code once
-    // the Phase 6 backfill populates user_id on all existing automation rows.
+    // Automations created through the web UI populate user_id at creation time
+    // (handleCreateAutomation resolves it for both GitHub and Google users), so this
+    // lookup is skipped for them. The fallback below only covers legacy rows with
+    // user_id = NULL: those predate Google login and store the GitHub numeric user ID
+    // in created_by (from NextAuth session.user.id), so a github-only identity lookup
+    // recovers the canonical user. It becomes dead code once legacy rows are backfilled.
     let userId = automation.user_id;
     if (!userId && automation.created_by && automation.created_by !== "anonymous") {
       try {
@@ -587,26 +568,39 @@ export class SchedulerDO extends DurableObject<Env> {
       }
     }
 
-    // Index the session in D1
-    const now = Date.now();
-    const sessionStore = new SessionIndexStore(this.env.DB);
-    await sessionStore.create({
-      id: sessionId,
-      title: `[Auto] ${automation.name}`,
-      repoOwner: automation.repo_owner,
-      repoName: automation.repo_name,
-      model: automation.model,
-      reasoningEffort: automation.reasoning_effort,
-      baseBranch: automation.base_branch,
-      status: "created",
-      spawnSource: "automation",
-      spawnDepth: 0,
-      automationId: automation.id,
-      automationRunId: runId,
-      userId,
-      createdAt: now,
-      updatedAt: now,
-    });
+    const [codeServerEnabled, sandboxSettings] = await Promise.all([
+      resolveCodeServerEnabled(this.env.DB, automation.repo_owner, automation.repo_name),
+      resolveSandboxSettings(this.env.DB, automation.repo_owner, automation.repo_name),
+    ]);
+
+    await initializeSession(
+      this.env,
+      {
+        sessionId,
+        repoOwner: automation.repo_owner,
+        repoName: automation.repo_name,
+        repoId: automation.repo_id,
+        defaultBranch: automation.base_branch,
+        title: `[Auto] ${automation.name}`,
+        model: automation.model,
+        reasoningEffort: automation.reasoning_effort,
+        participantUserId: automation.created_by,
+        platformUserId: userId,
+        scmTokenEncrypted: null,
+        scmRefreshTokenEncrypted: null,
+        codeServerEnabled,
+        sandboxSettings,
+        spawnSource: "automation",
+        spawnDepth: 0,
+        automationId: automation.id,
+        automationRunId: runId,
+      },
+      {
+        trace_id: `automation:${automation.id}`,
+        request_id: runId,
+        metrics: createRequestMetrics(),
+      }
+    );
 
     return { sessionId };
   }

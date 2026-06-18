@@ -14,11 +14,15 @@ const {
 }));
 
 vi.mock("@anthropic-ai/sdk", () => ({
-  default: vi.fn().mockImplementation(() => ({
-    messages: {
-      create: mockMessagesCreate,
-    },
-  })),
+  // vitest 4 only treats `function`/`class` implementations as constructable;
+  // an arrow function here throws "is not a constructor" on `new Anthropic()`.
+  default: vi.fn().mockImplementation(function () {
+    return {
+      messages: {
+        create: mockMessagesCreate,
+      },
+    };
+  }),
 }));
 
 vi.mock("./repos", () => ({
@@ -128,7 +132,7 @@ describe("RepoClassifier", () => {
     expect(result.confidence).toBe("low");
     expect(result.needsClarification).toBe(true);
     expect(result.reasoning).toContain("structured model output");
-    expect(result.alternatives).toHaveLength(2);
+    expect(result.alternatives).toBeUndefined();
   });
 
   it("asks for clarification when tool output is missing", async () => {
@@ -148,6 +152,6 @@ describe("RepoClassifier", () => {
     expect(result.confidence).toBe("low");
     expect(result.needsClarification).toBe(true);
     expect(result.reasoning).toContain("structured model output");
-    expect(result.alternatives).toHaveLength(2);
+    expect(result.alternatives).toBeUndefined();
   });
 });
