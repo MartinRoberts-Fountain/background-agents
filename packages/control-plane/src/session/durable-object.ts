@@ -15,9 +15,11 @@ import { generateId, hashToken, encryptToken, decryptToken } from "../auth/crypt
 import { buildModalSandboxDashboardUrl, createModalClient } from "../sandbox/client";
 import { createDaytonaRestClient } from "../sandbox/daytona-rest-client";
 import { createVercelSandboxClient } from "../sandbox/providers/vercel/client";
+import { createRwxRestClient } from "../sandbox/rwx-rest-client";
 import { createModalProvider } from "../sandbox/providers/modal-provider";
 import { createDaytonaProvider } from "../sandbox/providers/daytona-provider";
 import { createVercelProvider } from "../sandbox/providers/vercel/provider";
+import { createRwxProvider } from "../sandbox/providers/rwx-provider";
 import { resolveSandboxBackendName, supportsRepoImageBackend } from "../sandbox/provider-name";
 import { createLogger, parseLogLevel } from "../logger";
 import type { Logger } from "../logger";
@@ -616,6 +618,27 @@ export class SessionDO extends DurableObject<Env> {
           runtime: this.env.VERCEL_RUNTIME,
           snapshotExpirationMs: parseInt(this.env.VERCEL_SNAPSHOT_EXPIRATION_MS || "0", 10),
           codeServerPasswordSecret: this.env.VERCEL_TOKEN,
+        });
+      }
+
+      if (sandboxBackend === "rwx") {
+        if (!this.env.RWX_ACCESS_TOKEN || !this.env.RWX_DISPATCH_KEY) {
+          throw new Error(
+            "RWX_ACCESS_TOKEN and RWX_DISPATCH_KEY are required when SANDBOX_PROVIDER=rwx"
+          );
+        }
+
+        const rwxClient = createRwxRestClient({
+          apiToken: this.env.RWX_ACCESS_TOKEN,
+          dispatchKey: this.env.RWX_DISPATCH_KEY,
+          baseUrl: this.env.RWX_BASE_URL,
+        });
+
+        return createRwxProvider(rwxClient, {
+          scmProvider: resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
+          // Reuses access token as HMAC secret for code-server password derivation
+          // (distinct message prefix prevents collision with auth use)
+          codeServerPasswordSecret: this.env.RWX_ACCESS_TOKEN,
         });
       }
 
