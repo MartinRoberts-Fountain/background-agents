@@ -88,9 +88,6 @@ export class RwxRestClient {
     if (!config.apiToken) {
       throw new Error("RwxRestClient requires apiToken");
     }
-    if (!config.dispatchKey) {
-      throw new Error("RwxRestClient requires dispatchKey");
-    }
 
     this.baseUrl = (config.baseUrl || DEFAULT_RWX_BASE_URL).replace(/\/+$/, "");
   }
