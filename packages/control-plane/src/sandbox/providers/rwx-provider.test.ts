@@ -132,6 +132,7 @@ describe("RwxSandboxProvider", () => {
 
       const params = (client.createDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0].params;
 
+      expect(params.slug).toBe("session-123");
       expect(params.PYTHONUNBUFFERED).toBe("1");
       expect(params.SANDBOX_ID).toBe("sandbox-456");
       expect(params.CONTROL_PLANE_URL).toBe("https://control-plane.test");

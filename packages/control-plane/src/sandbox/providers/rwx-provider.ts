@@ -100,6 +100,7 @@ export class RwxSandboxProvider implements SandboxProvider {
     const sessionConfig = buildSessionConfig(config);
 
     Object.assign(params, {
+      slug: config.sessionId,
       PYTHONUNBUFFERED: "1",
       SANDBOX_ID: config.sandboxId,
       CONTROL_PLANE_URL: config.controlPlaneUrl,
