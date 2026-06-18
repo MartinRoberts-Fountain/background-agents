@@ -98,7 +98,6 @@ export interface Env {
   VERCEL_SANDBOX_API_BASE_URL?: string; // Override for tests or non-default Vercel API base URL
   VERCEL_SNAPSHOT_EXPIRATION_MS?: string; // Snapshot expiration in ms; 0 means no expiration
   RWX_ACCESS_TOKEN?: string; // RWX API access token for Dispatch API
-  RWX_DISPATCH_KEY?: string; // RWX dispatch trigger key used to launch sandbox runs
   RWX_BASE_URL?: string; // Override for RWX API base URL (default: https://cloud.rwx.com)
 
   // Sandbox lifecycle configuration

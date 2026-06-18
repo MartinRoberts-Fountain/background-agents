@@ -65,7 +65,7 @@ export class RwxSandboxProvider implements SandboxProvider {
       const params = await this.buildDispatchParams(config);
 
       const dispatch = await this.client.createDispatch({
-        key: this.client.config.dispatchKey,
+        key: `${config.repoOwner}-${config.repoName}`,
         params,
         ref: config.branch,
         title: `Open-Inspect session ${config.sessionId}`,

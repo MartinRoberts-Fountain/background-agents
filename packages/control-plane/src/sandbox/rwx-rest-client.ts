@@ -16,8 +16,6 @@ const log = createLogger("rwx-rest-client");
 export interface RwxRestConfig {
   /** RWX API access token (Bearer auth) */
   apiToken: string;
-  /** RWX dispatch trigger key that receives sandbox dispatches */
-  dispatchKey: string;
   /** Override for tests or non-default RWX API base URL (default: https://cloud.rwx.com) */
   baseUrl?: string;
 }

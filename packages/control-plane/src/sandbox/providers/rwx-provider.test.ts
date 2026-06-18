@@ -23,7 +23,6 @@ import {
 
 const defaultRestConfig: RwxRestConfig = {
   apiToken: "test-rwx-token",
-  dispatchKey: "open-inspect-sandbox",
 };
 
 function createMockClient(
@@ -100,7 +99,7 @@ describe("RwxSandboxProvider", () => {
       expect(result.createdAt).toBeGreaterThan(0);
 
       const createCall = (client.createDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
-      expect(createCall.key).toBe("open-inspect-sandbox");
+      expect(createCall.key).toBe("testowner-testrepo");
       expect(createCall.title).toContain("session-123");
     });
 

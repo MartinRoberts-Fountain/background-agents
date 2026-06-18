@@ -622,15 +622,12 @@ export class SessionDO extends DurableObject<Env> {
       }
 
       if (sandboxBackend === "rwx") {
-        if (!this.env.RWX_ACCESS_TOKEN || !this.env.RWX_DISPATCH_KEY) {
-          throw new Error(
-            "RWX_ACCESS_TOKEN and RWX_DISPATCH_KEY are required when SANDBOX_PROVIDER=rwx"
-          );
+        if (!this.env.RWX_ACCESS_TOKEN) {
+          throw new Error("RWX_ACCESS_TOKEN is required when SANDBOX_PROVIDER=rwx");
         }
 
         const rwxClient = createRwxRestClient({
           apiToken: this.env.RWX_ACCESS_TOKEN,
-          dispatchKey: this.env.RWX_DISPATCH_KEY,
           baseUrl: this.env.RWX_BASE_URL,
         });
 
